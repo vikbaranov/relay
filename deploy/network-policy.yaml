@@ -1,0 +1,48 @@
+# Default-deny all ingress and egress for user runtime pods.
+# Only allow: DNS, egress to control plane, egress to LLM endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-user-pods
+  namespace: ai-assistants
+spec:
+  podSelector:
+    matchLabels:
+      ai.ops-agent.io/part-of: zeroclaw-runtime
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow inbound only from the controller
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ops-agent-controller
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # LLM providers and tools — restrict further in production
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+---
+# Controller can reach user pods and the internet (Mattermost WS)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-egress
+  namespace: ai-assistants
+spec:
+  podSelector:
+    matchLabels:
+      app: ops-agent-controller
+  policyTypes:
+    - Egress
+  egress:
+    - {}  # unrestricted outbound; tighten per environment

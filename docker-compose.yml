@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mattermost
+      POSTGRES_PASSWORD: mattermost
+      POSTGRES_DB: mattermost
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mattermost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8065:8065"
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: postgres://mattermost:mattermost@postgres:5432/mattermost?sslmode=disable
+      MM_SERVICESETTINGS_SITEURL: http://localhost:8065
+      MM_BOTS_ENABLECREATION: "true"
+      MM_PLUGINSETTINGS_ENABLE: "true"
+      MM_LOGSETTINGS_ENABLECONSOLE: "true"
+    volumes:
+      - mattermost_data:/mattermost/data
+      - mattermost_logs:/mattermost/logs
+      - mattermost_config:/mattermost/config
+      - mattermost_plugins:/mattermost/plugins
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8065/api/v4/system/ping || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  ops-agent:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      mattermost:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      MATTERMOST_URL: http://mattermost
+      MATTERMOST_PORT: 8065
+      # K8S_MODE=kubeconfig requires mounting a kubeconfig file below
+      # K8S_MODE: kubeconfig
+      # K8S_KUBECONFIG_PATH: /app/kubeconfig
+    # volumes:
+    #   - ./kubeconfig:/app/kubeconfig:ro
+
+volumes:
+  postgres_data:
+  mattermost_data:
+  mattermost_logs:
+  mattermost_config:
+  mattermost_plugins:

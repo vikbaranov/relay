@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ops-agent-controller
+  namespace: ai-assistants
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ops-agent-controller
+  template:
+    metadata:
+      labels:
+        app: ops-agent-controller
+    spec:
+      serviceAccountName: ops-agent-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: ghcr.io/YOUR_ORG/ops-agent:latest
+          imagePullPolicy: Always
+          envFrom:
+            - secretRef:
+                name: ops-agent-controller
+          ports:
+            - containerPort: 8080
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ops-agent-controller
+  namespace: ai-assistants
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ops-agent-controller
