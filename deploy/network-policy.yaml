@@ -4,7 +4,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: deny-all-user-pods
-  namespace: ai-assistants
+  namespace: sandbox
 spec:
   podSelector:
     matchLabels:
@@ -37,7 +37,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: controller-egress
-  namespace: ai-assistants
+  namespace: sandbox
 spec:
   podSelector:
     matchLabels:
@@ -45,4 +45,4 @@ spec:
   policyTypes:
     - Egress
   egress:
-    - {}  # unrestricted outbound; tighten per environment
+    - {} # unrestricted outbound; tighten per environment

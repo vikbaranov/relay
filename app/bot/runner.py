@@ -35,7 +35,8 @@ def run_bot(settings: Settings) -> None:
         MATTERMOST_PORT=settings.mattermost_port,
         BOT_TOKEN=settings.mattermost_bot_token,
         BOT_TEAM=settings.mattermost_team,
-        LOG_LEVEL=logging.getLevelName(settings.log_level.upper()),
+        LOG_LEVEL=settings.log_level,
+        SSL_VERIFY=settings.ssl_verify,
     )
 
     logger.info(

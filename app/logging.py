@@ -19,8 +19,8 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def configure_logging(level: str = "INFO") -> None:
+def configure_logging(level: int = logging.INFO) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
-    logging.root.setLevel(level.upper())
+    logging.root.setLevel(level)
     logging.root.handlers = [handler]

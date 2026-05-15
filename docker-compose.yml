@@ -25,7 +25,7 @@ services:
     environment:
       MM_SQLSETTINGS_DRIVERNAME: postgres
       MM_SQLSETTINGS_DATASOURCE: postgres://mattermost:mattermost@postgres:5432/mattermost?sslmode=disable
-      MM_SERVICESETTINGS_SITEURL: http://localhost:8065
+      MM_SERVICESETTINGS_SITEURL: https://mattermost.ops-agent.orb.local
       MM_BOTS_ENABLECREATION: "true"
       MM_PLUGINSETTINGS_ENABLE: "true"
       MM_LOGSETTINGS_ENABLECONSOLE: "true"
@@ -35,7 +35,11 @@ services:
       - mattermost_config:/mattermost/config
       - mattermost_plugins:/mattermost/plugins
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8065/api/v4/system/ping || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf http://localhost:8065/api/v4/system/ping || exit 1",
+        ]
       interval: 20s
       timeout: 10s
       retries: 10
@@ -44,9 +48,9 @@ services:
   ops-agent:
     build: .
     restart: unless-stopped
-    depends_on:
-      mattermost:
-        condition: service_healthy
+    # depends_on:
+    #   mattermost:
+    #     condition: service_healthy
     env_file: .env
     environment:
       MATTERMOST_URL: http://mattermost

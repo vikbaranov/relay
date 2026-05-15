@@ -296,7 +296,7 @@ import websockets
 
 from mmpy_bot import Bot, Settings, Plugin, listen_to, Message
 
-NAMESPACE = os.getenv("K8S_NAMESPACE", "ai-assistants")
+NAMESPACE = os.getenv("K8S_NAMESPACE", "sandbox")
 ZEROCLAW_PORT = int(os.getenv("ZEROCLAW_PORT", "42617"))
 
 config.load_incluster_config()
@@ -475,7 +475,7 @@ bot.run()
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: ai-assistants
+  name: sandbox
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
@@ -485,13 +485,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mattermost-controller
-  namespace: ai-assistants
+  namespace: sandbox
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: mattermost-controller
-  namespace: ai-assistants
+  namespace: sandbox
 rules:
   - apiGroups: [""]
     resources: ["pods", "services", "persistentvolumeclaims", "events"]
@@ -504,7 +504,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: mattermost-controller
-  namespace: ai-assistants
+  namespace: sandbox
 subjects:
   - kind: ServiceAccount
     name: mattermost-controller
@@ -517,7 +517,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: mattermost-controller-secrets
-  namespace: ai-assistants
+  namespace: sandbox
 type: Opaque
 stringData:
   MATTERMOST_URL: "https://chat.example.com"
@@ -534,7 +534,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mattermost-controller
-  namespace: ai-assistants
+  namespace: sandbox
 spec:
   replicas: 2
   selector:
@@ -572,7 +572,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: mattermost-controller
-  namespace: ai-assistants
+  namespace: sandbox
 spec:
   minAvailable: 1
   selector:

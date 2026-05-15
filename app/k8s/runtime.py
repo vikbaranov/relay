@@ -8,14 +8,9 @@ from datetime import datetime, timezone
 from kubernetes import client
 
 from app.config import Settings
-from app.identity import object_name, pvc_name, session_id
+from app.identity import object_name, pvc_name
 
 logger = logging.getLogger(__name__)
-
-LABEL_PART_OF = "ai.ops-agent.io/part-of"
-ANNOTATION_MM_USER = "ai.ops-agent.io/mm-user-id"
-ANNOTATION_LAST_ACTIVITY = "ai.ops-agent.io/last-activity"
-PART_OF_VALUE = "zeroclaw-runtime"
 
 
 class RuntimeManager:
@@ -31,15 +26,15 @@ class RuntimeManager:
         self._secret = settings.k8s_name_secret.encode()
         self._ns = settings.k8s_namespace
 
-    # ── public API ──────────────────────────────────────────────────────────
-
     def ensure_runtime(self, mm_user_id: str) -> str:
         """Create or wake up per-user resources. Returns internal service DNS."""
+        s = self._settings
         name = object_name(self._secret, mm_user_id)
         pvc = pvc_name(self._secret, mm_user_id)
-        labels = {"app": name, LABEL_PART_OF: PART_OF_VALUE}
-        annotations = {ANNOTATION_MM_USER: mm_user_id}
+        labels = {"app": name, s.k8s_label_part_of: s.k8s_part_of_value}
+        annotations = {s.k8s_annotation_mm_user: mm_user_id}
 
+        self._ensure_configmap()
         self._ensure_pvc(pvc, labels, annotations)
         self._ensure_service(name, labels, annotations)
         self._ensure_deployment(name, pvc, mm_user_id, labels, annotations)
@@ -55,10 +50,9 @@ class RuntimeManager:
 
     def wait_ready(self, service_dns: str) -> None:
         """Poll /health until 200 or timeout. Raises TimeoutError."""
-        timeout = self._settings.pod_ready_timeout_seconds
-        deadline = time.monotonic() + timeout
-        url = f"http://{service_dns}:{self._settings.zeroclaw_port}/health"
-        interval = 2.0
+        s = self._settings
+        deadline = time.monotonic() + s.pod_ready_timeout_seconds
+        url = f"http://{service_dns}:{s.zeroclaw_port}/health"
         while time.monotonic() < deadline:
             try:
                 with urllib.request.urlopen(url, timeout=2) as r:
@@ -66,28 +60,32 @@ class RuntimeManager:
                         return
             except Exception:
                 pass
-            time.sleep(interval)
-        raise TimeoutError(f"ZeroClaw pod not ready after {timeout}s: {service_dns}")
+            time.sleep(1.0)
+        raise TimeoutError(
+            f"ZeroClaw pod not ready after {s.pod_ready_timeout_seconds}s: {service_dns}"
+        )
 
     def update_last_activity(self, mm_user_id: str) -> None:
+        s = self._settings
         name = object_name(self._secret, mm_user_id)
         now = datetime.now(timezone.utc).isoformat()
         try:
             self._apps.patch_namespaced_deployment(
                 name,
                 self._ns,
-                {"metadata": {"annotations": {ANNOTATION_LAST_ACTIVITY: now}}},
+                {"metadata": {"annotations": {s.k8s_annotation_last_activity: now}}},
             )
         except Exception:
             logger.warning("failed to update last-activity for %s", name)
 
     def list_idle(self, ttl_seconds: int) -> list[str]:
         """Return names of Deployments idle longer than ttl_seconds."""
+        s = self._settings
         idle = []
         try:
             deploys = self._apps.list_namespaced_deployment(
                 self._ns,
-                label_selector=f"{LABEL_PART_OF}={PART_OF_VALUE}",
+                label_selector=f"{s.k8s_label_part_of}={s.k8s_part_of_value}",
             )
         except Exception:
             logger.warning("failed to list deployments for idle check")
@@ -97,7 +95,7 @@ class RuntimeManager:
         for d in deploys.items:
             if (d.spec.replicas or 0) == 0:
                 continue
-            last = (d.metadata.annotations or {}).get(ANNOTATION_LAST_ACTIVITY)
+            last = (d.metadata.annotations or {}).get(s.k8s_annotation_last_activity)
             if last:
                 try:
                     ts = datetime.fromisoformat(last).timestamp()
@@ -109,14 +107,40 @@ class RuntimeManager:
 
     def scale_down(self, name: str) -> None:
         try:
-            self._apps.patch_namespaced_deployment(
-                name, self._ns, {"spec": {"replicas": 0}}
-            )
+            self._apps.patch_namespaced_deployment(name, self._ns, {"spec": {"replicas": 0}})
             logger.info("scaled down idle runtime", extra={"runtime_key": name})
         except Exception:
             logger.warning("failed to scale down %s", name)
 
-    # ── private helpers ─────────────────────────────────────────────────────
+    def _ensure_configmap(self) -> None:
+        s = self._settings
+        toml = f"""\
+[gateway]
+allow_public_bind = true
+
+[agent]
+max_tool_iterations = 30
+parallel_tools = true
+
+[providers]
+fallback = "{s.openai_base_url}"
+
+[providers.models."{s.openai_base_url}"]
+model = "{s.openai_model}"
+api_key = "{s.openai_api_key}"
+"""
+        body = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(name=s.zeroclaw_configmap, namespace=self._ns),
+            data={s.zeroclaw_config_key: toml},
+        )
+        try:
+            self._core.read_namespaced_config_map(s.zeroclaw_configmap, self._ns)
+            self._core.replace_namespaced_config_map(s.zeroclaw_configmap, self._ns, body)
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
+            self._core.create_namespaced_config_map(self._ns, body)
+            logger.info("created ConfigMap %s", s.zeroclaw_configmap)
 
     def _ensure_pvc(
         self,
@@ -131,21 +155,18 @@ class RuntimeManager:
             if exc.status != 404:
                 raise
 
+        s = self._settings
         spec = client.V1PersistentVolumeClaimSpec(
             access_modes=["ReadWriteOnce"],
-            resources=client.V1VolumeResourceRequirements(
-                requests={"storage": self._settings.user_pvc_size}
-            ),
+            resources=client.V1VolumeResourceRequirements(requests={"storage": s.user_pvc_size}),
         )
-        if self._settings.user_pvc_storage_class:
-            spec.storage_class_name = self._settings.user_pvc_storage_class
+        if s.user_pvc_storage_class:
+            spec.storage_class_name = s.user_pvc_storage_class
 
         self._core.create_namespaced_persistent_volume_claim(
             self._ns,
             client.V1PersistentVolumeClaim(
-                metadata=client.V1ObjectMeta(
-                    name=name, labels=labels, annotations=annotations
-                ),
+                metadata=client.V1ObjectMeta(name=name, labels=labels, annotations=annotations),
                 spec=spec,
             ),
         )
@@ -164,18 +185,17 @@ class RuntimeManager:
             if exc.status != 404:
                 raise
 
+        s = self._settings
         self._core.create_namespaced_service(
             self._ns,
             client.V1Service(
-                metadata=client.V1ObjectMeta(
-                    name=name, labels=labels, annotations=annotations
-                ),
+                metadata=client.V1ObjectMeta(name=name, labels=labels, annotations=annotations),
                 spec=client.V1ServiceSpec(
                     selector={"app": name},
                     ports=[
                         client.V1ServicePort(
-                            port=self._settings.zeroclaw_port,
-                            target_port=self._settings.zeroclaw_port,
+                            port=s.zeroclaw_port,
+                            target_port=s.zeroclaw_port,
                             protocol="TCP",
                         )
                     ],
@@ -195,10 +215,17 @@ class RuntimeManager:
     ) -> None:
         try:
             deploy = self._apps.read_namespaced_deployment(name, self._ns)
-            # Wake up a scaled-down pod
             if (deploy.spec.replicas or 0) == 0:
+                now = datetime.now(timezone.utc).isoformat()
                 self._apps.patch_namespaced_deployment(
-                    name, self._ns, {"spec": {"replicas": 1}}
+                    name,
+                    self._ns,
+                    {
+                        "spec": {"replicas": 1},
+                        "metadata": {
+                            "annotations": {self._settings.k8s_annotation_last_activity: now}
+                        },
+                    },
                 )
                 logger.info("scaled up idle runtime %s", name)
             return
@@ -216,12 +243,17 @@ class RuntimeManager:
         container = client.V1Container(
             name="zeroclaw",
             image=s.zeroclaw_image,
-            args=["zeroclaw", "daemon"],
+            args=["daemon", "--host", "0.0.0.0"],
             image_pull_policy="IfNotPresent",
             ports=[client.V1ContainerPort(container_port=s.zeroclaw_port, protocol="TCP")],
-            env=[client.V1EnvVar(name="ZEROCLAW_ALLOW_PUBLIC_BIND", value="1")],
+            env=[
+                client.V1EnvVar(name="ZEROCLAW_REQUIRE_PAIRING", value="false"),
+            ],
             volume_mounts=[
-                client.V1VolumeMount(name="data", mount_path=s.zeroclaw_data_path)
+                client.V1VolumeMount(name="data", mount_path=s.zeroclaw_data_path),
+                client.V1VolumeMount(
+                    name="model-config", mount_path=s.zeroclaw_config_mount, read_only=True
+                ),
             ],
             startup_probe=client.V1Probe(
                 http_get=client.V1HTTPGetAction(path="/health", port=s.zeroclaw_port),
@@ -254,15 +286,17 @@ class RuntimeManager:
                     persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
                         claim_name=pvc
                     ),
-                )
+                ),
+                client.V1Volume(
+                    name="model-config",
+                    config_map=client.V1ConfigMapVolumeSource(name=s.zeroclaw_configmap),
+                ),
             ],
         )
         self._apps.create_namespaced_deployment(
             self._ns,
             client.V1Deployment(
-                metadata=client.V1ObjectMeta(
-                    name=name, labels=labels, annotations=annotations
-                ),
+                metadata=client.V1ObjectMeta(name=name, labels=labels, annotations=annotations),
                 spec=client.V1DeploymentSpec(
                     replicas=1,
                     selector=client.V1LabelSelector(match_labels={"app": name}),
