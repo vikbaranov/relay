@@ -1,5 +1,6 @@
 """Tiny HTTP server exposing /healthz and /readyz for the controller pod's own K8s probes."""
 
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -13,20 +14,19 @@ def mark_ready() -> None:
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/healthz":
-            self._respond(200, b"ok")
+            self._respond(200, {"status": "ok"})
         elif self.path == "/readyz":
-            if _ready.is_set():
-                self._respond(200, b"ok")
-            else:
-                self._respond(503, b"not ready")
+            ready = _ready.is_set()
+            self._respond(200 if ready else 503, {"ready": ready})
         else:
-            self._respond(404, b"not found")
+            self._respond(404, {"error": "not found"})
 
-    def _respond(self, code: int, body: bytes) -> None:
+    def _respond(self, code: int, body: dict) -> None:
+        data = json.dumps(body).encode()
         self.send_response(code)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(data)
 
     def log_message(self, *_):  # silence default access log
         pass

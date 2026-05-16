@@ -46,20 +46,26 @@ class RuntimeManager:
             with urllib.request.urlopen(url, timeout=1) as r:
                 return r.status == 200
         except Exception:
+            logger.debug("health_check_failed service_dns=%s", service_dns, exc_info=True)
             return False
 
     def wait_ready(self, service_dns: str) -> None:
         """Poll /health until 200 or timeout. Raises TimeoutError."""
         s = self._settings
-        deadline = time.monotonic() + s.pod_ready_timeout_seconds
+        t0 = time.monotonic()
+        deadline = t0 + s.pod_ready_timeout_seconds
         url = f"http://{service_dns}:{s.zeroclaw_port}/health"
         while time.monotonic() < deadline:
             try:
                 with urllib.request.urlopen(url, timeout=2) as r:
                     if r.status == 200:
+                        logger.info(
+                            "pod_ready service_dns=%s elapsed=%.1fs",
+                            service_dns, time.monotonic() - t0,
+                        )
                         return
             except Exception:
-                pass
+                logger.debug("pod_not_ready_yet service_dns=%s", service_dns, exc_info=True)
             time.sleep(1.0)
         raise TimeoutError(
             f"ZeroClaw pod not ready after {s.pod_ready_timeout_seconds}s: {service_dns}"
@@ -76,7 +82,10 @@ class RuntimeManager:
                 {"metadata": {"annotations": {s.k8s_annotation_last_activity: now}}},
             )
         except Exception:
-            logger.warning("failed to update last-activity for %s", name)
+            logger.warning(
+                "failed to update last-activity for %s", name,
+                exc_info=True, extra={"runtime_key": name, "namespace": self._ns},
+            )
 
     def list_idle(self, ttl_seconds: int) -> list[str]:
         """Return names of Deployments idle longer than ttl_seconds."""
@@ -88,7 +97,10 @@ class RuntimeManager:
                 label_selector=f"{s.k8s_label_part_of}={s.k8s_part_of_value}",
             )
         except Exception:
-            logger.warning("failed to list deployments for idle check")
+            logger.warning(
+                "failed to list deployments for idle check",
+                exc_info=True, extra={"namespace": self._ns},
+            )
             return idle
 
         cutoff = time.time() - ttl_seconds
@@ -110,7 +122,10 @@ class RuntimeManager:
             self._apps.patch_namespaced_deployment(name, self._ns, {"spec": {"replicas": 0}})
             logger.info("scaled down idle runtime", extra={"runtime_key": name})
         except Exception:
-            logger.warning("failed to scale down %s", name)
+            logger.warning(
+                "failed to scale down %s", name,
+                exc_info=True, extra={"runtime_key": name, "namespace": self._ns},
+            )
 
     def _ensure_configmap(self) -> None:
         s = self._settings

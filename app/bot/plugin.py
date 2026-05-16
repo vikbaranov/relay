@@ -1,79 +1,18 @@
 import logging
 import threading
-import time
 
 from mmpy_bot.function import listen_to, listen_webhook
 from mmpy_bot.plugins.base import Plugin
 from mmpy_bot.wrappers import ActionEvent, Message
 
+from app.bot.formatting import _CURSOR, _MM_MAX_POST
+from app.bot.stream_handler import StreamHandler
 from app.config import Settings
 from app.identity import object_name, session_id
 from app.k8s.runtime import RuntimeManager
 from app.zeroclaw.client import chat_stream
 
 logger = logging.getLogger(__name__)
-
-_CURSOR = "▌"
-_UPDATE_INTERVAL = 1.0  # seconds between incremental patches
-_RESULT_MAX = 150
-_HEARTBEAT_INTERVAL = 10.0  # seconds between thinking-indicator updates
-_MM_MAX_POST = 2_000
-
-_TOOL_ICONS: dict[str, str] = {
-    "web_search": "🔍",
-    "web_search_tool": "🔍",
-    "web_fetch": "🌐",
-    "bash": "💻",
-    "execute_bash": "💻",
-    "shell": "💻",
-    "python": "🐍",
-    "execute_python": "🐍",
-    "read_file": "📄",
-    "write_file": "✏️",
-    "list_files": "📁",
-}
-_TOOL_ICON_DEFAULT = "⚙️"
-
-
-def _key_arg(name: str, args: dict | None) -> str:
-    if not args:
-        return ""
-    val = next(iter(args.values()), "")
-    s = str(val).strip()
-    if s.startswith(("http://", "https://")):
-        try:
-            from urllib.parse import urlparse
-
-            p = urlparse(s)
-            path = p.path[:50] if len(p.path) > 50 else p.path
-            s = p.netloc + path
-        except Exception:
-            pass
-    if len(s) > 80:
-        s = s[:77] + "..."
-    return s
-
-
-def _fmt_tool_running(name: str, args: dict | None) -> str:
-    icon = _TOOL_ICONS.get(name, _TOOL_ICON_DEFAULT)
-    key = _key_arg(name, args)
-    if key:
-        return f"_{icon} `{name}`: {key}..._"
-    return f"_{icon} `{name}`..._"
-
-
-def _fmt_tool_done(name: str, key: str, output: str) -> str:
-    icon = _TOOL_ICONS.get(name, _TOOL_ICON_DEFAULT)
-    out = output.strip()
-    if "no results found" in out.lower():
-        summary = "нет результатов"
-    elif len(out) > _RESULT_MAX:
-        summary = out[:_RESULT_MAX] + "..."
-    else:
-        summary = out
-    if key:
-        return f"_{icon} `{name}`: {key} → {summary}_"
-    return f"_{icon} `{name}` → {summary}_"
 
 
 class ZeroClawPlugin(Plugin):
@@ -87,7 +26,10 @@ class ZeroClawPlugin(Plugin):
     def _patch(self, post_id: str, text: str) -> None:
         if len(text) > _MM_MAX_POST:
             text = text[: _MM_MAX_POST - 60] + "\n\n_[ответ обрезан — слишком длинный]_"
-        self.driver.posts.patch_post(post_id, {"message": text})
+        try:
+            self.driver.posts.patch_post(post_id, {"message": text})
+        except Exception:
+            logger.error("patch_post_failed post_id=%s", post_id, exc_info=True)
 
     def _request_approval(
         self, frame: dict, channel_id: str, root_id: str, main_post_id: str
@@ -112,7 +54,7 @@ class ZeroClawPlugin(Plugin):
                 "props": {
                     "attachments": [
                         {
-                            "text": f"**Подтверждение действия**\nИнструмент: `{tool}`\n{summary}",
+                            "text": f"**Подтверждение действия**\nИнструмент: `{tool}`\n```\n{summary}\n```",
                             "actions": [
                                 {
                                     "id": "approve",
@@ -147,12 +89,18 @@ class ZeroClawPlugin(Plugin):
             }
         )
         approval_post_id = approval_post["id"]
+        logger.info(
+            "approval_requested request_id=%s tool=%s timeout_secs=%s",
+            request_id, tool, timeout,
+        )
 
         event = threading.Event()
         self._pending_approvals[request_id] = {
             "event": event,
             "approved": False,
             "approval_post_id": approval_post_id,
+            "tool": tool,
+            "summary": summary,
         }
 
         if event.wait(timeout=timeout):
@@ -160,6 +108,7 @@ class ZeroClawPlugin(Plugin):
         else:
             self._pending_approvals.pop(request_id, None)
             approved = False
+            logger.warning("approval_timeout request_id=%s tool=%s", request_id, tool)
             self.driver.posts.patch_post(
                 approval_post_id,
                 {
@@ -184,19 +133,27 @@ class ZeroClawPlugin(Plugin):
             )
             return
 
+        tool = pending.get("tool", "?")
+        summary = pending.get("summary", "")
         pending["approved"] = approved
         pending["event"].set()
 
+        logger.info(
+            "approval_decision request_id=%s tool=%s approved=%s user=%s",
+            request_id, tool, approved, event.user_name,
+        )
+
         status = "✅ Разрешено" if approved else "❌ Отклонено"
+        header = f"**Подтверждение действия**: `{tool}`"
+        if summary:
+            header += f"\n```\n{summary}\n```"
         self.driver.respond_to_web(
             event,
             {
                 "update": {
                     "props": {
                         "attachments": [
-                            {
-                                "text": f"**Подтверждение действия**\n{status} пользователем @{event.user_name}"
-                            }
+                            {"text": f"{header}\n{status} пользователем @{event.user_name}"}
                         ]
                     }
                 }
@@ -214,7 +171,9 @@ class ZeroClawPlugin(Plugin):
 
         mm_user_id: str = message.user_id
         rkey = object_name(self._secret, mm_user_id)
-        extra = {"runtime_key": rkey, "channel_id": message.channel_id}
+        thread_id = message.reply_id or message.id
+        extra = {"runtime_key": rkey, "channel_id": message.channel_id, "thread_id": thread_id}
+        logger.info("message_received runtime_key=%s thread_id=%s", rkey, thread_id, extra=extra)
 
         service_dns = self._runtime.ensure_runtime(mm_user_id)
 
@@ -239,9 +198,9 @@ class ZeroClawPlugin(Plugin):
             )
             post_id = post["id"]
 
+        extra["post_id"] = post_id
         self._runtime.update_last_activity(mm_user_id)
 
-        thread_id = message.reply_id or message.id
         ws_url = (
             f"ws://{service_dns}:{self._settings.zeroclaw_port}"
             f"/ws/chat?session_id={session_id(mm_user_id, thread_id)}"
@@ -255,108 +214,18 @@ class ZeroClawPlugin(Plugin):
                 main_post_id=post_id,
             )
 
-        chunks: list[str] = []
-        tool_log: list[str] = []  # persistent, accumulates all tool call/result lines
-        current_tool: str = ""  # tool call pending its result (display string)
-        current_tool_name: str = ""
-        current_tool_key: str = ""
-        last_update = time.monotonic()
-        stream_start = time.monotonic()
+        handler = StreamHandler(lambda text: self._patch(post_id, text), extra)
         heartbeat_stop = threading.Event()
-
-        def _render(cursor: bool = False) -> str:
-            parts = []
-            all_tools = tool_log + ([current_tool] if current_tool else [])
-            if all_tools:
-                parts.append("\n".join(all_tools))
-            text = "".join(chunks)
-            if text:
-                parts.append(text + (_CURSOR if cursor else ""))
-            return "\n\n".join(parts) if parts else ""
-
-        def _heartbeat() -> None:
-            tick = 0
-            while not heartbeat_stop.wait(timeout=_HEARTBEAT_INTERVAL):
-                if tool_log or current_tool or chunks:
-                    continue
-                elapsed = int(time.monotonic() - stream_start)
-                dots = "." * (tick % 3 + 1)
-                self._patch(post_id, f"_Думаю{dots}_ ({elapsed}с)")
-                tick += 1
-
-        hb = threading.Thread(target=_heartbeat, daemon=True)
+        hb = threading.Thread(target=handler.heartbeat, args=(heartbeat_stop,), daemon=True)
         hb.start()
         try:
             for frame in chat_stream(
                 ws_url, message.text, on_approval_request=_on_approval_request
             ):
-                ftype = frame.get("type")
-                if ftype == "chunk":
-                    chunks.append(frame.get("content", ""))
-                    current_tool = ""
-                    now = time.monotonic()
-                    if now - last_update >= _UPDATE_INTERVAL:
-                        self._patch(post_id, _render(cursor=True))
-                        last_update = now
-                elif ftype == "tool_call":
-                    tool_name = frame.get("name", "?")
-                    args = frame.get("args")
-                    current_tool_name = tool_name
-                    current_tool_key = _key_arg(tool_name, args)
-                    current_tool = _fmt_tool_running(tool_name, args)
-                    logger.info(
-                        "tool_call tool=%s args=%s call_id=%s",
-                        tool_name,
-                        args,
-                        frame.get("id"),
-                        extra=extra,
-                    )
-                    self._patch(post_id, _render())
-                    last_update = time.monotonic()
-                elif ftype == "tool_result":
-                    tool_name = frame.get("name", "?")
-                    output = frame.get("output", "")
-                    logger.info(
-                        "tool_result tool=%s output=%s call_id=%s",
-                        tool_name,
-                        output[:200],
-                        frame.get("id"),
-                        extra=extra,
-                    )
-                    tool_log.append(
-                        _fmt_tool_done(current_tool_name or tool_name, current_tool_key, output)
-                    )
-                    current_tool = ""
-                    current_tool_name = ""
-                    current_tool_key = ""
-                    self._patch(post_id, _render())
-                    last_update = time.monotonic()
-                elif ftype == "done":
-                    final = frame.get("full_response") or "".join(chunks)
-                    tool_section = "\n".join(tool_log)
-                    if tool_section and final:
-                        self._patch(post_id, f"{tool_section}\n\n{final}")
-                    elif tool_section:
-                        self._patch(post_id, tool_section)
-                    else:
-                        self._patch(post_id, final)
+                if handler.handle_frame(frame):
                     break
-                elif ftype == "error":
-                    raise RuntimeError(f"ZeroClaw error: {frame.get('message')}")
-                elif ftype in ("session_start", "approval_request"):
-                    pass
-                elif ftype is not None:
-                    logger.warning("unhandled zeroclaw frame type=%s frame=%s", ftype, frame)
             else:
-                final = _render()
-                if final:
-                    self._patch(post_id, final)
-                else:
-                    logger.warning(
-                        "zeroclaw stream ended without 'done' frame for %s", rkey, extra=extra
-                    )
-                    self._patch(post_id, "Соединение с агентом прервано. Попробуйте ещё раз.")
-
+                handler.handle_stream_end(rkey)
         except Exception:
             logger.exception("zeroclaw chat failed for %s", rkey, extra=extra)
             self._patch(post_id, "Произошла ошибка при обработке запроса.")
@@ -366,3 +235,4 @@ class ZeroClawPlugin(Plugin):
             hb.join(timeout=1)
 
         self._runtime.update_last_activity(mm_user_id)
+        logger.info("message_done runtime_key=%s thread_id=%s", rkey, thread_id, extra=extra)
