@@ -81,6 +81,9 @@ k8s_yaml(blob(_env_secret(".env", "ops-agent-controller", NAMESPACE)))
 # ── Network policy ────────────────────────────────────────────────────────────
 k8s_yaml("deploy/network-policy.yaml")
 
+# ── Service (webhook) ────────────────────────────────────────────────────────
+k8s_yaml("deploy/service.yaml")
+
 # ── Dev Deployment (1 replica, local image) ───────────────────────────────────
 k8s_yaml(blob("""
 apiVersion: apps/v1
@@ -109,6 +112,8 @@ spec:
           ports:
             - containerPort: 8080
               name: health
+            - containerPort: 8579
+              name: webhook
           livenessProbe:
             httpGet:
               path: /healthz
@@ -133,7 +138,7 @@ spec:
 # ── Port forward + dependency ordering ───────────────────────────────────────
 k8s_resource(
     "ops-agent-controller",
-    port_forwards  = ["8080:8080"],
+    port_forwards  = ["8080:8080", "0.0.0.0:8579:8579"],
     resource_deps  = ["namespaces", "mattermost"],
     labels         = ["app"],
 )

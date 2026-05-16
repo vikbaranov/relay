@@ -15,6 +15,6 @@ def pvc_name(secret: bytes, mm_user_id: str) -> str:
     return f"{object_name(secret, mm_user_id)}-data"
 
 
-def session_id(mm_user_id: str) -> str:
-    """ZeroClaw WS session id for this user."""
-    return f"mm-{mm_user_id}"
+def session_id(mm_user_id: str, thread_id: str) -> str:
+    """ZeroClaw WS session id scoped to a Mattermost thread."""
+    return f"mm-{mm_user_id}-{thread_id}"

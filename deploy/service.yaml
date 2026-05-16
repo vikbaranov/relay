@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ops-agent-controller
+  namespace: sandbox
+spec:
+  selector:
+    app: ops-agent-controller
+  ports:
+    - name: health
+      port: 8080
+      targetPort: 8080
+    - name: webhook
+      port: 8579
+      targetPort: 8579

@@ -37,6 +37,9 @@ def run_bot(settings: Settings) -> None:
         BOT_TEAM=settings.mattermost_team,
         LOG_LEVEL=settings.log_level,
         SSL_VERIFY=settings.ssl_verify,
+        WEBHOOK_HOST_ENABLED=True,
+        WEBHOOK_HOST_URL="http://0.0.0.0",
+        WEBHOOK_HOST_PORT=settings.webhook_host_port,
     )
 
     logger.info(

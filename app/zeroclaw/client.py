@@ -3,7 +3,8 @@
 import asyncio
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import Optional
 
 import websockets
 
@@ -26,13 +27,48 @@ async def _chat_async(ws_url: str, text: str) -> str:
         return "".join(chunks)
 
 
-async def _chat_stream_async(ws_url: str, text: str):
-    async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
+async def _chat_stream_async(
+    ws_url: str,
+    text: str,
+    on_approval_request: Optional[Callable[[dict], bool]] = None,
+):
+    async with websockets.connect(
+        ws_url,
+        ping_interval=20,
+        ping_timeout=20,
+        open_timeout=30,
+        close_timeout=10,
+    ) as ws:
         await ws.send(json.dumps({"type": "message", "content": text}))
         async for raw in ws:
             frame = json.loads(raw)
+            ftype = frame.get("type")
+            if ftype not in ("chunk",):
+                logger.info("ws_rx type=%s frame=%s", ftype, frame)
+            if ftype == "approval_request" and on_approval_request is not None:
+                t0 = asyncio.get_event_loop().time()
+                logger.info(
+                    "approval_request received request_id=%s timeout_secs=%s tool=%s",
+                    frame.get("request_id"),
+                    frame.get("timeout_secs"),
+                    frame.get("tool"),
+                )
+                loop = asyncio.get_event_loop()
+                approved = await loop.run_in_executor(None, on_approval_request, frame)
+                elapsed = asyncio.get_event_loop().time() - t0
+                logger.info(
+                    "approval_response sending approved=%s elapsed=%.1fs request_id=%s",
+                    approved,
+                    elapsed,
+                    frame.get("request_id"),
+                )
+                await ws.send(json.dumps({
+                    "type": "approval_response",
+                    "request_id": frame["request_id"],
+                    "decision": "approve" if approved else "deny",
+                }))
             yield frame
-            if frame.get("type") in ("done", "error"):
+            if ftype in ("done", "error"):
                 break
 
 
@@ -41,10 +77,14 @@ def chat(ws_url: str, text: str) -> str:
     return asyncio.run(_chat_async(ws_url, text))
 
 
-def chat_stream(ws_url: str, text: str) -> Iterator[dict]:
+def chat_stream(
+    ws_url: str,
+    text: str,
+    on_approval_request: Optional[Callable[[dict], bool]] = None,
+) -> Iterator[dict]:
     """Yield WebSocket frames from ZeroClaw as they arrive."""
     loop = asyncio.new_event_loop()
-    agen = _chat_stream_async(ws_url, text)
+    agen = _chat_stream_async(ws_url, text, on_approval_request=on_approval_request)
     try:
         while True:
             try:

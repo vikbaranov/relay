@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     user_pvc_size: str = "5Gi"
     user_pvc_storage_class: str | None = None
 
+    webhook_host_port: int = 8579
+    webhook_public_url: str = ""
+
     idle_timeout_seconds: int = 3600
     pod_ready_timeout_seconds: int = 120
     reaper_interval_seconds: int = 60
