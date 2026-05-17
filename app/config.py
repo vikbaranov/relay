@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     mattermost_team: str
     mattermost_bot_token: str
     mattermost_bot_username: str
+    mattermost_thread_replies: bool = True
 
     k8s_namespace: str = "sandbox"
     k8s_mode: str = "incluster"  # incluster | kubeconfig

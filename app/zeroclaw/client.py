@@ -4,16 +4,19 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable, Iterator
+from typing import Literal
 
 import websockets
 
 logger = logging.getLogger(__name__)
 
+ApprovalDecision = Literal["approve", "deny", "always", "timeout"]
+
 
 async def _chat_stream_async(
     ws_url: str,
     text: str,
-    on_approval_request: Callable[[dict], bool] | None = None,
+    on_approval_request: Callable[[dict], ApprovalDecision] | None = None,
 ):
     async with websockets.connect(
         ws_url,
@@ -37,18 +40,19 @@ async def _chat_stream_async(
                     frame.get("timeout_secs"),
                     frame.get("tool"),
                 )
-                approved = await loop.run_in_executor(None, on_approval_request, frame)
+                decision = await loop.run_in_executor(None, on_approval_request, frame)
                 logger.info(
-                    "approval_response sending approved=%s elapsed=%.1fs request_id=%s",
-                    approved,
+                    "approval_response sending decision=%s elapsed=%.1fs request_id=%s",
+                    decision,
                     loop.time() - t0,
                     frame.get("request_id"),
                 )
-                await ws.send(json.dumps({
+                response = {
                     "type": "approval_response",
-                    "request_id": frame["request_id"],
-                    "decision": "approve" if approved else "deny",
-                }))
+                    "request_id": frame.get("request_id"),
+                    "decision": decision,
+                }
+                await ws.send(json.dumps(response))
             yield frame
             if ftype in ("done", "error"):
                 break
@@ -57,7 +61,7 @@ async def _chat_stream_async(
 def chat_stream(
     ws_url: str,
     text: str,
-    on_approval_request: Callable[[dict], bool] | None = None,
+    on_approval_request: Callable[[dict], ApprovalDecision] | None = None,
 ) -> Iterator[dict]:
     loop = asyncio.new_event_loop()
     agen = _chat_stream_async(ws_url, text, on_approval_request=on_approval_request)

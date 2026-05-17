@@ -47,6 +47,11 @@ k8s_errors_total = Counter(
     "Kubernetes API errors by operation",
     ["op"],
 )
+tokens_total = Counter(
+    "ops_agent_tokens_total",
+    "LLM tokens consumed by kind and model",
+    ["kind", "model"],
+)
 
 # Label values for k8s_errors_total
 K8S_OP_UPDATE_LAST_ACTIVITY = "update_last_activity"

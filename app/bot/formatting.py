@@ -41,12 +41,9 @@ def _key_arg(name: str, args: dict | None) -> str:
     val = next(iter(args.values()), "")
     s = str(val).strip()
     if s.startswith(("http://", "https://")):
-        try:
-            p = urlparse(s)
-            path = p.path[:50] if len(p.path) > 50 else p.path
-            s = p.netloc + path
-        except Exception:
-            pass
+        p = urlparse(s)
+        path = p.path[:50] if len(p.path) > 50 else p.path
+        s = p.netloc + path
     return _truncate(s, 80)
 
 

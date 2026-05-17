@@ -15,6 +15,7 @@ def pvc_name(secret: bytes, mm_user_id: str) -> str:
     return f"{object_name(secret, mm_user_id)}-data"
 
 
-def session_id(mm_user_id: str, thread_id: str) -> str:
-    """ZeroClaw WS session id scoped to a Mattermost thread."""
-    return f"mm-{mm_user_id}-{thread_id}"
+def session_id(scope: str, generation: int = 0) -> str:
+    """ZeroClaw WS session id for a Mattermost conversation scope."""
+    digest = hashlib.sha256(f"{scope}:{generation}".encode()).hexdigest()[:24]
+    return f"mm-{digest}"

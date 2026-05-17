@@ -95,6 +95,20 @@ class StreamHandler:
                 self._patch(tool_section)
             else:
                 self._patch(final)
+            model = frame.get("model") or "unknown"
+            input_tokens = frame.get("input_tokens") or 0
+            output_tokens = frame.get("output_tokens") or 0
+            if input_tokens or output_tokens:
+                metrics.tokens_total.labels(kind="input", model=model).inc(input_tokens)
+                metrics.tokens_total.labels(kind="output", model=model).inc(output_tokens)
+            logger.info(
+                "llm_usage model=%s provider=%s input_tokens=%d output_tokens=%d",
+                model,
+                frame.get("provider", "unknown"),
+                input_tokens,
+                output_tokens,
+                extra=self._extra,
+            )
             return True
         elif ftype == "error":
             raise RuntimeError(f"ZeroClaw error: {frame.get('message')}")

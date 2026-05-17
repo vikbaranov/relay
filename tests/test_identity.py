@@ -30,4 +30,11 @@ def test_pvc_name_derived_from_object_name():
 
 
 def test_session_id_format():
-    assert session_id(USER_A) == f"mm-{USER_A}"
+    value = session_id(f"mattermost_ch1:post1_{USER_A}")
+    assert value.startswith("mm-")
+    assert len(value) == 27
+
+
+def test_session_id_uses_generation():
+    scope = f"mattermost_ch1:post1_{USER_A}"
+    assert session_id(scope, 0) != session_id(scope, 1)

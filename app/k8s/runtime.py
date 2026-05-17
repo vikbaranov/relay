@@ -13,6 +13,10 @@ from app.identity import object_name, pvc_name
 
 logger = logging.getLogger(__name__)
 
+LABEL_PART_OF = "ai.ops-agent.io/part-of"
+ANNOTATION_LAST_ACTIVITY = "ai.ops-agent.io/last-activity"
+PART_OF_VALUE = "zeroclaw-runtime"
+
 
 class RuntimeManager:
     def __init__(

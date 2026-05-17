@@ -1,11 +1,11 @@
 """ZeroClawPlugin unit tests."""
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
+from app.bot.plugin import ZeroClawPlugin, _SessionState
 from app.config import Settings
-from app.bot.plugin import ZeroClawPlugin
 
 
 def _settings() -> Settings:
@@ -14,6 +14,7 @@ def _settings() -> Settings:
         mattermost_team="t",
         mattermost_bot_token="tok",
         mattermost_bot_username="bot",
+        mattermost_thread_replies=True,
         k8s_name_secret="test-secret",
         k8s_mode="kubeconfig",
     )
@@ -30,14 +31,17 @@ def _make_plugin(is_ready=True):
     plugin.driver.client.userid = "bot-id"
     plugin.driver.create_post.return_value = {"id": "post-123"}
     plugin.handle_message.plugin = plugin
+    plugin.handle_approval.plugin = plugin
     return plugin, runtime
 
 
 def _make_message(text="hello", user_id="user1"):
     msg = MagicMock()
+    msg.id = "post-1"
     msg.text = text
     msg.user_id = user_id
     msg.channel_id = "ch1"
+    msg.root_id = ""
     msg.reply_id = ""
     return msg
 
@@ -54,6 +58,82 @@ class TestHandleMessage:
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_message(msg)
         plugin.driver.posts.patch_post.assert_called_with("post-123", {"message": "response text"})
+
+    def test_top_level_message_replies_in_thread_by_default(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        msg = _make_message()
+        frames = _frames({"type": "done", "full_response": "response text"})
+        with patch("app.bot.plugin.chat_stream", return_value=frames):
+            plugin.handle_message(msg)
+        assert plugin.driver.create_post.call_args[1]["root_id"] == "post-1"
+
+    def test_thread_reply_uses_root_thread_for_scope_and_routing(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        msg = _make_message()
+        msg.root_id = "root-1"
+        msg.reply_id = "root-1"
+        frames = _frames({"type": "done", "full_response": "response text"})
+        with patch("app.bot.plugin.chat_stream", return_value=frames) as stream:
+            plugin.handle_message(msg)
+        assert plugin.driver.create_post.call_args[1]["root_id"] == "root-1"
+        ws_url = stream.call_args[0][0]
+        assert "session_id=mm-" in ws_url
+
+    def test_channel_scoped_when_thread_replies_disabled(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        plugin._settings.mattermost_thread_replies = False
+        msg = _make_message()
+        frames = _frames({"type": "done", "full_response": "response text"})
+        with patch("app.bot.plugin.chat_stream", return_value=frames):
+            plugin.handle_message(msg)
+        assert plugin.driver.create_post.call_args[1]["root_id"] == ""
+
+    def test_new_command_starts_new_context_without_chat_stream(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        msg = _make_message(text="!new")
+        with patch("app.bot.plugin.chat_stream") as stream:
+            plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+        stream.assert_not_called()
+        assert plugin.driver.create_post.call_args[1]["message"] == "Новый контекст начат для текущей ветки."
+
+    def test_new_command_changes_session_generation(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        msg = _make_message()
+        frames = _frames({"type": "done", "full_response": "one"})
+        with patch("app.bot.plugin.chat_stream", return_value=frames) as stream:
+            plugin.handle_message(msg)
+        first_url = stream.call_args[0][0]
+
+        plugin.handle_message(_make_message(text="!new"))
+
+        frames = _frames({"type": "done", "full_response": "two"})
+        with patch("app.bot.plugin.chat_stream", return_value=frames) as stream:
+            plugin.handle_message(msg)
+        second_url = stream.call_args[0][0]
+        assert first_url != second_url
+
+    def test_stop_command_signals_active_stream(self):
+        plugin, runtime = _make_plugin()
+        msg = _make_message(text="!stop")
+        scope = plugin._session_scope(msg)
+        stop_event = threading.Event()
+        plugin._sessions[scope] = _SessionState(stop_event=stop_event)
+        plugin.handle_message(msg)
+        assert stop_event.is_set()
+        runtime.ensure_runtime.assert_not_called()
+        plugin.driver.create_post.assert_called_with(
+            channel_id="ch1", message="Выполнение остановлено.", root_id="post-1"
+        )
+
+    def test_stop_command_with_no_active_stream(self):
+        plugin, runtime = _make_plugin()
+        msg = _make_message(text="!stop")
+        plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+        plugin.driver.create_post.assert_called_with(
+            channel_id="ch1", message="Нет активного выполнения.", root_id="post-1"
+        )
 
     def test_ignores_bot_own_messages(self):
         plugin, runtime = _make_plugin()
@@ -74,7 +154,7 @@ class TestHandleMessage:
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_message(msg)
         call_msg = plugin.driver.create_post.call_args[1]["message"]
-        assert "Пожалуйста" in call_msg
+        assert call_msg == "▌"
 
     def test_patches_cold_start_message(self):
         plugin, runtime = _make_plugin(is_ready=False)
@@ -82,8 +162,7 @@ class TestHandleMessage:
         frames = _frames({"type": "done", "full_response": "resp"})
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_message(msg)
-        patch_calls = [c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list]
-        assert any("Запуск" in m for m in patch_calls)
+        assert "Запускается" in plugin.driver.create_post.call_args[1]["message"]
 
     def test_patches_error_on_chat_failure(self):
         plugin, runtime = _make_plugin(is_ready=True)
@@ -117,9 +196,51 @@ class TestHandleMessage:
             {"type": "done", "full_response": "Hello world"},
         )
         with patch("app.bot.plugin.chat_stream", return_value=frames), \
-             patch("app.bot.plugin.time") as mock_time:
-            mock_time.monotonic.side_effect = [0.0, 2.0, 2.0]
+             patch("app.bot.stream_handler.time") as mock_time:
+            mock_time.monotonic.side_effect = [0.0, 0.0, 2.0]
             plugin.handle_message(msg)
         patch_messages = [c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list]
         assert any("▌" in m for m in patch_messages)
         assert patch_messages[-1] == "Hello world"
+
+
+class TestApprovalRequests:
+    def test_returns_always_decision(self):
+        plugin, _ = _make_plugin()
+        plugin.driver.posts.create_post.return_value = {"id": "approval-post"}
+        frame = {
+            "request_id": "req-1",
+            "tool": "shell",
+            "arguments_summary": "ls",
+            "timeout_secs": 1,
+        }
+        result = {}
+
+        thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "decision", plugin._request_approval(frame, "ch1", "root1", "post-123")
+            )
+        )
+        thread.start()
+        deadline = time.monotonic() + 1
+        while "req-1" not in plugin._pending_approvals and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        event = MagicMock()
+        event.context = {"request_id": "req-1", "decision": "always"}
+        event.user_name = "alice"
+        plugin.handle_approval(event)
+
+        thread.join(timeout=1)
+        assert result["decision"] == "always"
+        plugin.driver.respond_to_web.assert_called_once()
+
+    def test_returns_timeout_decision(self):
+        plugin, _ = _make_plugin()
+        plugin.driver.posts.create_post.return_value = {"id": "approval-post"}
+        frame = {"request_id": "req-2", "tool": "shell", "timeout_secs": 0.01}
+
+        decision = plugin._request_approval(frame, "ch1", "root1", "post-123")
+
+        assert decision == "timeout"
+        assert "req-2" not in plugin._pending_approvals
