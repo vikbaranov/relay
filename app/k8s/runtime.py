@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from kubernetes import client
 
+from app import metrics
 from app.config import Settings
 from app.identity import object_name, pvc_name
 
@@ -59,9 +60,11 @@ class RuntimeManager:
             try:
                 with urllib.request.urlopen(url, timeout=2) as r:
                     if r.status == 200:
+                        elapsed = time.monotonic() - t0
+                        metrics.pod_startup_seconds.observe(elapsed)
                         logger.info(
                             "pod_ready service_dns=%s elapsed=%.1fs",
-                            service_dns, time.monotonic() - t0,
+                            service_dns, elapsed,
                         )
                         return
             except Exception:
@@ -82,6 +85,7 @@ class RuntimeManager:
                 {"metadata": {"annotations": {s.k8s_annotation_last_activity: now}}},
             )
         except Exception:
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_UPDATE_LAST_ACTIVITY).inc()
             logger.warning(
                 "failed to update last-activity for %s", name,
                 exc_info=True, extra={"runtime_key": name, "namespace": self._ns},
@@ -97,6 +101,7 @@ class RuntimeManager:
                 label_selector=f"{s.k8s_label_part_of}={s.k8s_part_of_value}",
             )
         except Exception:
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_LIST_IDLE).inc()
             logger.warning(
                 "failed to list deployments for idle check",
                 exc_info=True, extra={"namespace": self._ns},
@@ -104,9 +109,11 @@ class RuntimeManager:
             return idle
 
         cutoff = time.time() - ttl_seconds
+        running = 0
         for d in deploys.items:
             if (d.spec.replicas or 0) == 0:
                 continue
+            running += 1
             last = (d.metadata.annotations or {}).get(s.k8s_annotation_last_activity)
             if last:
                 try:
@@ -115,6 +122,7 @@ class RuntimeManager:
                         idle.append(d.metadata.name)
                 except ValueError:
                     pass
+        metrics.active_pods.set(running)
         return idle
 
     def scale_down(self, name: str) -> None:
@@ -122,6 +130,7 @@ class RuntimeManager:
             self._apps.patch_namespaced_deployment(name, self._ns, {"spec": {"replicas": 0}})
             logger.info("scaled down idle runtime", extra={"runtime_key": name})
         except Exception:
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_SCALE_DOWN).inc()
             logger.warning(
                 "failed to scale down %s", name,
                 exc_info=True, extra={"runtime_key": name, "namespace": self._ns},

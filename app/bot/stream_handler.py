@@ -3,6 +3,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from app import metrics
 from app.bot.formatting import (
     _CURSOR,
     _HEARTBEAT_INTERVAL,
@@ -60,6 +61,7 @@ class StreamHandler:
             args = frame.get("args")
             self._current_tool_key = _key_arg(tool_name, args)
             self._current_tool = _fmt_tool_running(tool_name, self._current_tool_key)
+            metrics.tool_calls_total.labels(tool=tool_name).inc()
             logger.debug(
                 "tool_call tool=%s args=%s call_id=%s",
                 tool_name,

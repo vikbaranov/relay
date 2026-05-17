@@ -1,10 +1,12 @@
 import logging
 import threading
+import time
 
 from mmpy_bot.function import listen_to, listen_webhook
 from mmpy_bot.plugins.base import Plugin
 from mmpy_bot.wrappers import ActionEvent, Message
 
+from app import metrics
 from app.bot.formatting import _CURSOR, _MM_MAX_POST
 from app.bot.stream_handler import StreamHandler
 from app.config import Settings
@@ -103,11 +105,14 @@ class ZeroClawPlugin(Plugin):
             "summary": summary,
         }
 
+        t0 = time.monotonic()
         if event.wait(timeout=timeout):
             approved = self._pending_approvals.pop(request_id, {}).get("approved", False)
+            metrics.approvals_total.labels(decision="approved" if approved else "denied").inc()
         else:
             self._pending_approvals.pop(request_id, None)
             approved = False
+            metrics.approvals_total.labels(decision="timeout").inc()
             logger.warning("approval_timeout request_id=%s tool=%s", request_id, tool)
             self.driver.posts.patch_post(
                 approval_post_id,
@@ -117,7 +122,7 @@ class ZeroClawPlugin(Plugin):
                     }
                 },
             )
-
+        metrics.approval_wait_seconds.observe(time.monotonic() - t0)
         return approved
 
     @listen_webhook("approval")
@@ -173,6 +178,7 @@ class ZeroClawPlugin(Plugin):
         rkey = object_name(self._secret, mm_user_id)
         thread_id = message.reply_id or message.id
         extra = {"runtime_key": rkey, "channel_id": message.channel_id, "thread_id": thread_id}
+        t0 = time.monotonic()
         logger.info("message_received runtime_key=%s thread_id=%s", rkey, thread_id, extra=extra)
 
         service_dns = self._runtime.ensure_runtime(mm_user_id)
@@ -187,6 +193,8 @@ class ZeroClawPlugin(Plugin):
             try:
                 self._runtime.wait_ready(service_dns)
             except TimeoutError:
+                metrics.messages_total.labels(outcome="timeout").inc()
+                metrics.message_duration.observe(time.monotonic() - t0)
                 logger.error("pod startup timeout for %s", rkey, extra=extra)
                 self._patch(post_id, "Превышено время ожидания запуска сессии. Попробуйте ещё раз.")
                 return
@@ -218,6 +226,7 @@ class ZeroClawPlugin(Plugin):
         heartbeat_stop = threading.Event()
         hb = threading.Thread(target=handler.heartbeat, args=(heartbeat_stop,), daemon=True)
         hb.start()
+        metrics.active_clients.inc()
         try:
             for frame in chat_stream(
                 ws_url, message.text, on_approval_request=_on_approval_request
@@ -227,12 +236,17 @@ class ZeroClawPlugin(Plugin):
             else:
                 handler.handle_stream_end(rkey)
         except Exception:
+            metrics.messages_total.labels(outcome="error").inc()
+            metrics.message_duration.observe(time.monotonic() - t0)
             logger.exception("zeroclaw chat failed for %s", rkey, extra=extra)
             self._patch(post_id, "Произошла ошибка при обработке запроса.")
             return
         finally:
+            metrics.active_clients.dec()
             heartbeat_stop.set()
             hb.join(timeout=1)
 
         self._runtime.update_last_activity(mm_user_id)
+        metrics.messages_total.labels(outcome="success").inc()
+        metrics.message_duration.observe(time.monotonic() - t0)
         logger.info("message_done runtime_key=%s thread_id=%s", rkey, thread_id, extra=extra)

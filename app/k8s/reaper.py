@@ -3,6 +3,7 @@
 import logging
 import threading
 
+from app import metrics
 from app.config import Settings
 from app.k8s.runtime import RuntimeManager
 
@@ -30,6 +31,7 @@ class IdleReaper(threading.Thread):
                 idle = self._runtime.list_idle(self._settings.idle_timeout_seconds)
                 for name in idle:
                     self._runtime.scale_down(name)
+                    metrics.pods_reaped_total.inc()
                 if idle:
                     logger.info("reaped %d idle runtimes", len(idle))
             except Exception:
