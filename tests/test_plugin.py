@@ -95,7 +95,10 @@ class TestHandleMessage:
             plugin.handle_message(msg)
         runtime.ensure_runtime.assert_not_called()
         stream.assert_not_called()
-        assert plugin.driver.create_post.call_args[1]["message"] == "Новый контекст начат для текущей ветки."
+        assert (
+            plugin.driver.create_post.call_args[1]["message"]
+            == "Новый контекст начат для текущей ветки."
+        )
 
     def test_new_command_changes_session_generation(self):
         plugin, runtime = _make_plugin(is_ready=True)
@@ -195,8 +198,10 @@ class TestHandleMessage:
             {"type": "chunk", "content": "Hello"},
             {"type": "done", "full_response": "Hello world"},
         )
-        with patch("app.bot.plugin.chat_stream", return_value=frames), \
-             patch("app.bot.stream_handler.time") as mock_time:
+        with (
+            patch("app.bot.plugin.chat_stream", return_value=frames),
+            patch("app.bot.stream_handler.time") as mock_time,
+        ):
             mock_time.monotonic.side_effect = [0.0, 0.0, 2.0]
             plugin.handle_message(msg)
         patch_messages = [c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list]

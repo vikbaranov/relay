@@ -1,7 +1,8 @@
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
 from mmpy_bot.function import listen_to, listen_webhook
 from mmpy_bot.plugins.base import Plugin
 from mmpy_bot.wrappers import ActionEvent, Message
@@ -85,8 +86,7 @@ class ZeroClawPlugin(Plugin):
                 "attachments": [
                     {
                         "text": (
-                            f"**Подтверждение действия**\n"
-                            f"Инструмент: `{tool}`\n```\n{summary}\n```"
+                            f"**Подтверждение действия**\nИнструмент: `{tool}`\n```\n{summary}\n```"
                         ),
                         "actions": [
                             _action("approve", "✅ Разрешить один раз", "approve"),
@@ -122,7 +122,9 @@ class ZeroClawPlugin(Plugin):
         approval_post_id = approval_post["id"]
         logger.info(
             "approval_requested request_id=%s tool=%s timeout_secs=%s",
-            request_id, tool, timeout,
+            request_id,
+            tool,
+            timeout,
         )
 
         event = threading.Event()
@@ -176,7 +178,10 @@ class ZeroClawPlugin(Plugin):
 
         logger.info(
             "approval_decision request_id=%s tool=%s decision=%s user=%s",
-            request_id, tool, decision, event.user_name,
+            request_id,
+            tool,
+            decision,
+            event.user_name,
         )
 
         status = {

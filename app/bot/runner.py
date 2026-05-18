@@ -4,11 +4,11 @@ from mmpy_bot import Bot
 from mmpy_bot.settings import Settings as MmpySettings
 
 from app import health
+from app.bot.plugin import ZeroClawPlugin
 from app.config import Settings
 from app.k8s.client import build_k8s_clients
 from app.k8s.reaper import IdleReaper
 from app.k8s.runtime import RuntimeManager
-from app.bot.plugin import ZeroClawPlugin
 from app.logging import configure_logging
 
 logger = logging.getLogger(__name__)

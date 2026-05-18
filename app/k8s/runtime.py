@@ -3,7 +3,7 @@
 import logging
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from kubernetes import client
 
@@ -68,7 +68,8 @@ class RuntimeManager:
                         metrics.pod_startup_seconds.observe(elapsed)
                         logger.info(
                             "pod_ready service_dns=%s elapsed=%.1fs",
-                            service_dns, elapsed,
+                            service_dns,
+                            elapsed,
                         )
                         return
             except Exception:
@@ -81,7 +82,7 @@ class RuntimeManager:
     def update_last_activity(self, mm_user_id: str) -> None:
         s = self._settings
         name = object_name(self._secret, mm_user_id)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         try:
             self._apps.patch_namespaced_deployment(
                 name,
@@ -91,8 +92,10 @@ class RuntimeManager:
         except Exception:
             metrics.k8s_errors_total.labels(op=metrics.K8S_OP_UPDATE_LAST_ACTIVITY).inc()
             logger.warning(
-                "failed to update last-activity for %s", name,
-                exc_info=True, extra={"runtime_key": name, "namespace": self._ns},
+                "failed to update last-activity for %s",
+                name,
+                exc_info=True,
+                extra={"runtime_key": name, "namespace": self._ns},
             )
 
     def list_idle(self, ttl_seconds: int) -> list[str]:
@@ -108,7 +111,8 @@ class RuntimeManager:
             metrics.k8s_errors_total.labels(op=metrics.K8S_OP_LIST_IDLE).inc()
             logger.warning(
                 "failed to list deployments for idle check",
-                exc_info=True, extra={"namespace": self._ns},
+                exc_info=True,
+                extra={"namespace": self._ns},
             )
             return idle
 
@@ -136,8 +140,10 @@ class RuntimeManager:
         except Exception:
             metrics.k8s_errors_total.labels(op=metrics.K8S_OP_SCALE_DOWN).inc()
             logger.warning(
-                "failed to scale down %s", name,
-                exc_info=True, extra={"runtime_key": name, "namespace": self._ns},
+                "failed to scale down %s",
+                name,
+                exc_info=True,
+                extra={"runtime_key": name, "namespace": self._ns},
             )
 
     def _ensure_configmap(self) -> None:
@@ -244,7 +250,7 @@ api_key = "{s.openai_api_key}"
         try:
             deploy = self._apps.read_namespaced_deployment(name, self._ns)
             if (deploy.spec.replicas or 0) == 0:
-                now = datetime.now(timezone.utc).isoformat()
+                now = datetime.now(UTC).isoformat()
                 self._apps.patch_namespaced_deployment(
                     name,
                     self._ns,
