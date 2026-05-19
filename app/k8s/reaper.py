@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 
 from app import metrics
 from app.config import Settings
@@ -27,6 +28,7 @@ class IdleReaper(threading.Thread):
             self._settings.reaper_interval_seconds,
         )
         while not self._stop.wait(self._settings.reaper_interval_seconds):
+            t0 = time.monotonic()
             try:
                 idle = self._runtime.list_idle(self._settings.idle_timeout_seconds)
                 for name in idle:
@@ -36,3 +38,5 @@ class IdleReaper(threading.Thread):
                     logger.info("reaped %d idle runtimes", len(idle))
             except Exception:
                 logger.exception("reaper iteration failed")
+            finally:
+                metrics.reaper_run_seconds.observe(time.monotonic() - t0)
