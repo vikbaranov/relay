@@ -34,8 +34,7 @@ class ZeroClawPlugin(Plugin):
         self._sessions: dict[str, _SessionState] = {}
         self._pending_approvals: dict[str, dict] = {}
         self._base_url: str = (
-            settings.webhook_public_url
-            or f"http://localhost:{settings.webhook_host_port}"
+            settings.webhook_public_url or f"http://localhost:{settings.webhook_host_port}"
         )
 
     def _reply_root_id(self, message: Message) -> str:
@@ -166,7 +165,7 @@ class ZeroClawPlugin(Plugin):
         if decision not in ("approve", "deny", "always"):
             decision = "approve" if bool(context.get("approved", False)) else "deny"
 
-        pending = self._pending_approvals.get(request_id)
+        pending = self._pending_approvals.get(request_id) if request_id else None
         if not pending:
             self.driver.respond_to_web(
                 event, {"update": {"message": "Запрос не найден или истёк."}}

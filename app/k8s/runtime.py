@@ -53,7 +53,7 @@ class RuntimeManager:
     def is_ready(self, service_dns: str) -> bool:
         url = f"http://{service_dns}:{self._settings.zeroclaw_port}/health"
         try:
-            with urllib.request.urlopen(url, timeout=1) as r:
+            with urllib.request.urlopen(url, timeout=1) as r:  # nosec B310
                 return r.status == 200
         except Exception:
             logger.debug("health_check_failed service_dns=%s", service_dns, exc_info=True)
@@ -67,7 +67,7 @@ class RuntimeManager:
         url = f"http://{service_dns}:{s.zeroclaw_port}/health"
         while time.monotonic() < deadline:
             try:
-                with urllib.request.urlopen(url, timeout=2) as r:
+                with urllib.request.urlopen(url, timeout=2) as r:  # nosec B310
                     if r.status == 200:
                         elapsed = time.monotonic() - t0
                         metrics.pod_startup_seconds.observe(elapsed)
@@ -107,7 +107,7 @@ class RuntimeManager:
     def list_idle(self, ttl_seconds: int) -> list[str]:
         """Return names of Deployments idle longer than ttl_seconds."""
         s = self._settings
-        idle = []
+        idle: list[str] = []
         try:
             deploys = self._apps.list_namespaced_deployment(
                 self._ns,
@@ -371,7 +371,7 @@ api_key = "{s.openai_api_key}"
         container = client.V1Container(
             name="zeroclaw",
             image=s.zeroclaw_image,
-            args=["daemon", "--host", "0.0.0.0"],
+            args=["daemon", "--host", "0.0.0.0"],  # nosec B104
             image_pull_policy="IfNotPresent",
             ports=[client.V1ContainerPort(container_port=s.zeroclaw_port, protocol="TCP")],
             env=[
