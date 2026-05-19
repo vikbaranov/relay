@@ -116,6 +116,44 @@ class TestHandleMessage:
         second_url = stream.call_args[0][0]
         assert first_url != second_url
 
+    def test_clear_command_starts_new_context_without_chat_stream(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        msg = _make_message(text="!clear")
+        with patch("app.bot.plugin.chat_stream") as stream:
+            plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+        stream.assert_not_called()
+        assert plugin.driver.create_post.call_args[1]["message"] == "Контекст очищен."
+
+    def test_clear_command_changes_session_generation(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        msg = _make_message()
+        frames = _frames({"type": "done", "full_response": "one"})
+        with patch("app.bot.plugin.chat_stream", return_value=frames) as stream:
+            plugin.handle_message(msg)
+        first_url = stream.call_args[0][0]
+
+        plugin.handle_message(_make_message(text="!clear"))
+
+        frames = _frames({"type": "done", "full_response": "two"})
+        with patch("app.bot.plugin.chat_stream", return_value=frames) as stream:
+            plugin.handle_message(msg)
+        second_url = stream.call_args[0][0]
+        assert first_url != second_url
+
+    def test_help_command_returns_help_text(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        msg = _make_message(text="!help")
+        with patch("app.bot.plugin.chat_stream") as stream:
+            plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+        stream.assert_not_called()
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "!new" in reply
+        assert "!clear" in reply
+        assert "!stop" in reply
+        assert "!env" in reply
+
     def test_stop_command_signals_active_stream(self):
         plugin, runtime = _make_plugin()
         msg = _make_message(text="!stop")
@@ -202,7 +240,7 @@ class TestHandleMessage:
             patch("app.bot.plugin.chat_stream", return_value=frames),
             patch("app.bot.stream_handler.time") as mock_time,
         ):
-            mock_time.monotonic.side_effect = [0.0, 0.0, 2.0]
+            mock_time.monotonic.side_effect = [0.0, 2.0, 3.0]
             plugin.handle_message(msg)
         patch_messages = [c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list]
         assert any("▌" in m for m in patch_messages)

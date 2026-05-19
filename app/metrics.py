@@ -3,7 +3,13 @@ from prometheus_client import Counter, Gauge, Histogram
 message_duration = Histogram(
     "ops_agent_message_duration_seconds",
     "End-to-end message processing time",
+    ["outcome"],
     buckets=[1, 3, 10, 30, 60, 120],
+)
+ensure_runtime_seconds = Histogram(
+    "ops_agent_ensure_runtime_seconds",
+    "K8s provisioning path duration (ensure_runtime)",
+    buckets=[0.1, 0.5, 1, 2, 5, 10],
 )
 messages_total = Counter(
     "ops_agent_messages_total",
@@ -20,6 +26,12 @@ tool_calls_total = Counter(
     "Tool invocations by tool name",
     ["tool"],
 )
+tool_call_duration_seconds = Histogram(
+    "ops_agent_tool_call_duration_seconds",
+    "Tool execution time from tool_call to tool_result frame",
+    ["tool"],
+    buckets=[0.1, 0.5, 1, 5, 15, 60],
+)
 approvals_total = Counter(
     "ops_agent_approvals_total",
     "Approval decisions by outcome",
@@ -27,7 +39,7 @@ approvals_total = Counter(
 )
 approval_wait_seconds = Histogram(
     "ops_agent_approval_wait_seconds",
-    "Time from approval request to user decision",
+    "Time from approval request to user decision (excludes timeouts)",
     buckets=[5, 10, 30, 60, 120],
 )
 active_clients = Gauge(
@@ -52,8 +64,26 @@ tokens_total = Counter(
     "LLM tokens consumed by kind and model",
     ["kind", "model"],
 )
+llm_request_duration_seconds = Histogram(
+    "ops_agent_llm_request_duration_seconds",
+    "Time from stream open to done frame",
+    buckets=[1, 3, 10, 30, 60, 120],
+)
+reaper_run_seconds = Histogram(
+    "ops_agent_reaper_run_seconds",
+    "Full reaper iteration duration",
+    buckets=[0.1, 0.5, 1, 5, 15],
+)
 
 # Label values for k8s_errors_total
 K8S_OP_UPDATE_LAST_ACTIVITY = "update_last_activity"
 K8S_OP_LIST_IDLE = "list_idle"
 K8S_OP_SCALE_DOWN = "scale_down"
+K8S_OP_ENV_SET = "env_set"
+K8S_OP_ENV_LIST = "env_list"
+K8S_OP_ENV_DELETE = "env_delete"
+K8S_OP_ENV_RESTART = "env_restart"
+K8S_OP_ENSURE_PVC = "ensure_pvc"
+K8S_OP_ENSURE_SERVICE = "ensure_service"
+K8S_OP_ENSURE_DEPLOYMENT = "ensure_deployment"
+K8S_OP_ENSURE_CONFIGMAP = "ensure_configmap"

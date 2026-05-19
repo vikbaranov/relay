@@ -24,8 +24,10 @@ class StreamHandler:
         self._tool_log: list[str] = []
         self._current_tool: str = ""
         self._current_tool_key: str = ""
-        self._last_update = time.monotonic()
-        self._stream_start = time.monotonic()
+        t = time.monotonic()
+        self._last_update = t
+        self._stream_start = t
+        self._pending_tool_start: dict[str, tuple[str, float]] = {}
 
     def render(self, cursor: bool = False) -> str:
         parts = []
@@ -58,27 +60,35 @@ class StreamHandler:
                 self._last_update = now
         elif ftype == "tool_call":
             tool_name = frame.get("name", "?")
+            call_id = frame.get("id") or tool_name
             args = frame.get("args")
             self._current_tool_key = _key_arg(tool_name, args)
             self._current_tool = _fmt_tool_running(tool_name, self._current_tool_key)
             metrics.tool_calls_total.labels(tool=tool_name).inc()
+            self._pending_tool_start[call_id] = (tool_name, time.monotonic())
             logger.debug(
                 "tool_call tool=%s args=%s call_id=%s",
                 tool_name,
                 args,
-                frame.get("id"),
+                call_id,
                 extra=self._extra,
             )
             self._patch(self.render())
             self._last_update = time.monotonic()
         elif ftype == "tool_result":
             tool_name = frame.get("name", "?")
+            call_id = frame.get("id") or tool_name
             output = frame.get("output", "")
+            pending = self._pending_tool_start.pop(call_id, None)
+            if pending is not None:
+                metrics.tool_call_duration_seconds.labels(tool=pending[0]).observe(
+                    time.monotonic() - pending[1]
+                )
             logger.debug(
                 "tool_result tool=%s output=%s call_id=%s",
                 tool_name,
                 output[:200],
-                frame.get("id"),
+                call_id,
                 extra=self._extra,
             )
             self._tool_log.append(_fmt_tool_done(tool_name, self._current_tool_key, output))
@@ -98,6 +108,7 @@ class StreamHandler:
             model = frame.get("model") or "unknown"
             input_tokens = frame.get("input_tokens") or 0
             output_tokens = frame.get("output_tokens") or 0
+            metrics.llm_request_duration_seconds.observe(time.monotonic() - self._stream_start)
             if input_tokens or output_tokens:
                 metrics.tokens_total.labels(kind="input", model=model).inc(input_tokens)
                 metrics.tokens_total.labels(kind="output", model=model).inc(output_tokens)
@@ -119,6 +130,7 @@ class StreamHandler:
         return False
 
     def handle_stream_end(self, rkey: str) -> None:
+        self._pending_tool_start.clear()
         final = self.render()
         if final:
             self._patch(final)

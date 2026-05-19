@@ -9,7 +9,7 @@ from kubernetes import client
 
 from app import metrics
 from app.config import Settings
-from app.identity import object_name, pvc_name
+from app.identity import env_secret_name, object_name, pvc_name
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,11 @@ class RuntimeManager:
         self._apps = apps
         self._secret = settings.k8s_name_secret.encode()
         self._ns = settings.k8s_namespace
+        self._configmap_ensured = False
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(UTC).isoformat()
 
     def ensure_runtime(self, mm_user_id: str) -> str:
         """Create or wake up per-user resources. Returns internal service DNS."""
@@ -70,6 +75,7 @@ class RuntimeManager:
                             "pod_ready service_dns=%s elapsed=%.1fs",
                             service_dns,
                             elapsed,
+                            extra={"namespace": self._ns},
                         )
                         return
             except Exception:
@@ -82,7 +88,7 @@ class RuntimeManager:
     def update_last_activity(self, mm_user_id: str) -> None:
         s = self._settings
         name = object_name(self._secret, mm_user_id)
-        now = datetime.now(UTC).isoformat()
+        now = self._now_iso()
         try:
             self._apps.patch_namespaced_deployment(
                 name,
@@ -95,7 +101,7 @@ class RuntimeManager:
                 "failed to update last-activity for %s",
                 name,
                 exc_info=True,
-                extra={"runtime_key": name, "namespace": self._ns},
+                extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
             )
 
     def list_idle(self, ttl_seconds: int) -> list[str]:
@@ -109,7 +115,7 @@ class RuntimeManager:
             )
         except Exception:
             metrics.k8s_errors_total.labels(op=metrics.K8S_OP_LIST_IDLE).inc()
-            logger.warning(
+            logger.error(
                 "failed to list deployments for idle check",
                 exc_info=True,
                 extra={"namespace": self._ns},
@@ -133,13 +139,89 @@ class RuntimeManager:
         metrics.active_pods.set(running)
         return idle
 
+    def set_user_env(self, mm_user_id: str, key: str, value: str) -> None:
+        """Upsert a key in the user's env Secret and restart their pod if running."""
+        sname = env_secret_name(self._secret, mm_user_id)
+        try:
+            self._core.patch_namespaced_secret(sname, self._ns, {"stringData": {key: value}})
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_SET).inc()
+                raise
+            self._core.create_namespaced_secret(
+                self._ns,
+                client.V1Secret(
+                    metadata=client.V1ObjectMeta(name=sname, namespace=self._ns),
+                    string_data={key: value},
+                ),
+            )
+        self._restart_if_running(mm_user_id)
+
+    def list_user_envs(self, mm_user_id: str) -> list[str]:
+        """Return sorted list of env key names (never values)."""
+        sname = env_secret_name(self._secret, mm_user_id)
+        try:
+            secret = self._core.read_namespaced_secret(sname, self._ns)
+            return sorted((secret.data or {}).keys())
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return []
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_LIST).inc()
+            raise
+
+    def delete_user_env(self, mm_user_id: str, key: str) -> bool:
+        """Remove a key from the user's env Secret. Returns True if key existed."""
+        sname = env_secret_name(self._secret, mm_user_id)
+        try:
+            secret = self._core.read_namespaced_secret(sname, self._ns)
+            if key not in (secret.data or {}):
+                return False
+            self._core.patch_namespaced_secret(sname, self._ns, {"data": {key: None}})
+            self._restart_if_running(mm_user_id)
+            return True
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return False
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_DELETE).inc()
+            raise
+
+    def _restart_if_running(self, mm_user_id: str) -> None:
+        name = object_name(self._secret, mm_user_id)
+        now = self._now_iso()
+        try:
+            restart_patch = {
+                "spec": {
+                    "template": {
+                        "metadata": {
+                            "annotations": {
+                                "kubectl.kubernetes.io/restartedAt": now,
+                            }
+                        }
+                    }
+                }
+            }
+            self._apps.patch_namespaced_deployment(name, self._ns, restart_patch)
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_RESTART).inc()
+            logger.error(
+                "failed to restart deployment %s",
+                name,
+                exc_info=True,
+                extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+            )
+
     def scale_down(self, name: str) -> None:
         try:
             self._apps.patch_namespaced_deployment(name, self._ns, {"spec": {"replicas": 0}})
-            logger.info("scaled down idle runtime", extra={"runtime_key": name})
+            logger.info(
+                "scaled down idle runtime",
+                extra={"runtime_key": name, "namespace": self._ns},
+            )
         except Exception:
             metrics.k8s_errors_total.labels(op=metrics.K8S_OP_SCALE_DOWN).inc()
-            logger.warning(
+            logger.error(
                 "failed to scale down %s",
                 name,
                 exc_info=True,
@@ -147,6 +229,8 @@ class RuntimeManager:
             )
 
     def _ensure_configmap(self) -> None:
+        if self._configmap_ensured:
+            return
         s = self._settings
         toml = f"""\
 [gateway]
@@ -172,9 +256,11 @@ api_key = "{s.openai_api_key}"
             self._core.replace_namespaced_config_map(s.zeroclaw_configmap, self._ns, body)
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_CONFIGMAP).inc()
                 raise
             self._core.create_namespaced_config_map(self._ns, body)
             logger.info("created ConfigMap %s", s.zeroclaw_configmap)
+        self._configmap_ensured = True
 
     def _ensure_pvc(
         self,
@@ -187,6 +273,7 @@ api_key = "{s.openai_api_key}"
             return
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_PVC).inc()
                 raise
 
         s = self._settings
@@ -204,7 +291,7 @@ api_key = "{s.openai_api_key}"
                 spec=spec,
             ),
         )
-        logger.info("created PVC %s", name)
+        logger.info("created PVC %s", name, extra={"runtime_key": name, "namespace": self._ns})
 
     def _ensure_service(
         self,
@@ -217,6 +304,7 @@ api_key = "{s.openai_api_key}"
             return
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_SERVICE).inc()
                 raise
 
         s = self._settings
@@ -237,7 +325,7 @@ api_key = "{s.openai_api_key}"
                 ),
             ),
         )
-        logger.info("created Service %s", name)
+        logger.info("created Service %s", name, extra={"runtime_key": name, "namespace": self._ns})
 
     def _ensure_deployment(
         self,
@@ -250,7 +338,7 @@ api_key = "{s.openai_api_key}"
         try:
             deploy = self._apps.read_namespaced_deployment(name, self._ns)
             if (deploy.spec.replicas or 0) == 0:
-                now = datetime.now(UTC).isoformat()
+                now = self._now_iso()
                 self._apps.patch_namespaced_deployment(
                     name,
                     self._ns,
@@ -261,13 +349,19 @@ api_key = "{s.openai_api_key}"
                         },
                     },
                 )
-                logger.info("scaled up idle runtime %s", name)
+                logger.info(
+                    "scaled up idle runtime %s",
+                    name,
+                    extra={"runtime_key": name, "namespace": self._ns},
+                )
             return
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_DEPLOYMENT).inc()
                 raise
 
         s = self._settings
+        env_secret = env_secret_name(self._secret, mm_user_id)
         sec_ctx = client.V1SecurityContext(
             run_as_non_root=True,
             allow_privilege_escalation=False,
@@ -282,6 +376,11 @@ api_key = "{s.openai_api_key}"
             ports=[client.V1ContainerPort(container_port=s.zeroclaw_port, protocol="TCP")],
             env=[
                 client.V1EnvVar(name="ZEROCLAW_REQUIRE_PAIRING", value="false"),
+            ],
+            env_from=[
+                client.V1EnvFromSource(
+                    secret_ref=client.V1SecretEnvSource(name=env_secret, optional=True)
+                )
             ],
             volume_mounts=[
                 client.V1VolumeMount(name="data", mount_path=s.zeroclaw_data_path),
@@ -341,4 +440,8 @@ api_key = "{s.openai_api_key}"
                 ),
             ),
         )
-        logger.info("created Deployment %s for user %s", name, mm_user_id[:8] + "…")
+        logger.info(
+            "created Deployment %s",
+            name,
+            extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+        )
