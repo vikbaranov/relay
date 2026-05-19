@@ -1,14 +1,13 @@
 """RuntimeManager unit tests with mocked K8s clients."""
 
-from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
-import pytest
 from kubernetes import client as k8s_client
 
 from app.config import Settings
-from app.identity import object_name, pvc_name
-from app.k8s.runtime import ANNOTATION_LAST_ACTIVITY, LABEL_PART_OF, PART_OF_VALUE, RuntimeManager
+from app.identity import object_name
+from app.k8s.runtime import ANNOTATION_LAST_ACTIVITY, RuntimeManager
 
 
 def _settings(**overrides) -> Settings:
@@ -34,7 +33,9 @@ def _make_runtime(settings=None):
 class TestEnsureRuntime:
     def test_creates_resources_on_first_call(self):
         rm, core, apps = _make_runtime()
-        core.read_namespaced_persistent_volume_claim.side_effect = k8s_client.exceptions.ApiException(status=404)
+        core.read_namespaced_persistent_volume_claim.side_effect = (
+            k8s_client.exceptions.ApiException(status=404)
+        )
         core.read_namespaced_service.side_effect = k8s_client.exceptions.ApiException(status=404)
         apps.read_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(status=404)
 
@@ -92,8 +93,8 @@ class TestListIdle:
 
     def test_returns_idle_deployments(self):
         rm, core, apps = _make_runtime()
-        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-        fresh_ts = datetime.now(timezone.utc).isoformat()
+        old_ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        fresh_ts = datetime.now(UTC).isoformat()
         apps.list_namespaced_deployment.return_value = MagicMock(
             items=[
                 self._make_deploy("zc-old", old_ts),
@@ -105,7 +106,7 @@ class TestListIdle:
 
     def test_skips_already_scaled_down(self):
         rm, core, apps = _make_runtime()
-        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        old_ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
         apps.list_namespaced_deployment.return_value = MagicMock(
             items=[self._make_deploy("zc-old", old_ts, replicas=0)]
         )

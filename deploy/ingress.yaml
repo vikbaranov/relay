@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: relay-webhook
+  namespace: sandbox
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /hooks/
+            pathType: Prefix
+            backend:
+              service:
+                name: relay-controller
+                port:
+                  number: 8579
