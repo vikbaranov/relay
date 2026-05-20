@@ -26,6 +26,21 @@ load("ext://restart_process", "docker_build_with_restart")
 IMAGE     = "relay:dev"
 NAMESPACE = "sandbox"
 
+# ── ZeroClaw image (base + gh CLI) ───────────────────────────────────────────
+# Zeroclaw pods are created dynamically by runtime.py, so Tilt can't track the
+# image via docker_build. Instead we build + kind-load explicitly.
+# Set ZEROCLAW_IMAGE=zeroclaw-custom:dev in .env to use this locally.
+local_resource(
+    "zeroclaw-image",
+    cmd = """
+CLUSTER=$(kubectl config current-context | sed 's/^kind-//') && \
+docker build -t zeroclaw-custom:dev -f Dockerfile.zeroclaw . && \
+kind load docker-image zeroclaw-custom:dev --name "$CLUSTER"
+""",
+    deps   = ["Dockerfile.zeroclaw"],
+    labels = ["infra"],
+)
+
 # ── Image ─────────────────────────────────────────────────────────────────────
 # Syncs ./app into the running container and restarts the Python process
 # without a full image rebuild on every code change.

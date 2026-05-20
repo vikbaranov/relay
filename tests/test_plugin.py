@@ -195,7 +195,41 @@ class TestHandleMessage:
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_message(msg)
         call_msg = plugin.driver.create_post.call_args[1]["message"]
-        assert call_msg == "▌"
+        assert call_msg == "_Запрос получен. Готовлю сессию..._"
+
+    def test_posts_before_ensuring_runtime(self):
+        plugin, runtime = _make_plugin(is_ready=True)
+        msg = _make_message()
+        frames = _frames({"type": "done", "full_response": "resp"})
+
+        def ensure_runtime(_user_id):
+            assert plugin.driver.create_post.called
+            return "zc-abc.ns.svc.cluster.local"
+
+        runtime.ensure_runtime.side_effect = ensure_runtime
+        with patch("app.bot.plugin.chat_stream", return_value=frames):
+            plugin.handle_message(msg)
+
+        assert (
+            plugin.driver.create_post.call_args_list[0][1]["message"]
+            == "_Запрос получен. Готовлю сессию..._"
+        )
+
+    def test_patches_ready_duration_after_cold_start(self):
+        plugin, runtime = _make_plugin(is_ready=False)
+        msg = _make_message()
+        frames = _frames({"type": "done", "full_response": "resp"})
+        with (
+            patch("app.bot.plugin.chat_stream", return_value=frames),
+            patch("app.bot.plugin.time") as mock_time,
+        ):
+            mock_time.monotonic.side_effect = [100.0, 100.0, 100.0, 100.0, 110.2, 111.0]
+            plugin.handle_message(msg)
+
+        patch_messages = [
+            c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list
+        ]
+        assert "Готов. Заняло 10с" in patch_messages
 
     def test_patches_cold_start_message(self):
         plugin, runtime = _make_plugin(is_ready=False)
@@ -203,7 +237,10 @@ class TestHandleMessage:
         frames = _frames({"type": "done", "full_response": "resp"})
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_message(msg)
-        assert "Запускается" in plugin.driver.create_post.call_args[1]["message"]
+        patch_messages = [
+            c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list
+        ]
+        assert any("Готов. Заняло" in message for message in patch_messages)
 
     def test_patches_error_on_chat_failure(self):
         plugin, runtime = _make_plugin(is_ready=True)
@@ -247,6 +284,92 @@ class TestHandleMessage:
         assert patch_messages[-1] == "Hello world"
 
 
+class TestSoulIdentityCommands:
+    def test_soul_show_with_override(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_workspace_file.return_value = "# Custom SOUL"
+        msg = _make_message(text="!soul show")
+        plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "Custom SOUL" in reply
+
+    def test_soul_show_without_override(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_workspace_file.return_value = None
+        msg = _make_message(text="!soul show")
+        plugin.handle_message(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "умолчанию" in reply.lower() or "default" in reply.lower()
+
+    def test_soul_bare_command_acts_as_show(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_workspace_file.return_value = None
+        msg = _make_message(text="!soul")
+        plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+
+    def test_soul_set_posts_edit_button(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_workspace_file.return_value = ""
+        msg = _make_message(text="!soul set")
+        plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+        call_options = plugin.driver.posts.create_post.call_args[1]["options"]
+        actions = call_options["props"]["attachments"][0]["actions"]
+        assert any("SOUL.md" in a["name"] for a in actions)
+
+    def test_soul_reset_found(self):
+        plugin, runtime = _make_plugin()
+        runtime.reset_workspace_file.return_value = True
+        msg = _make_message(text="!soul reset")
+        plugin.handle_message(msg)
+        runtime.reset_workspace_file.assert_called_once_with("user1", "SOUL.md")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "✅" in reply
+
+    def test_soul_reset_not_found(self):
+        plugin, runtime = _make_plugin()
+        runtime.reset_workspace_file.return_value = False
+        msg = _make_message(text="!soul reset")
+        plugin.handle_message(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "✅" not in reply
+
+    def test_identity_set_posts_edit_button(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_workspace_file.return_value = ""
+        msg = _make_message(text="!identity set")
+        plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+        call_options = plugin.driver.posts.create_post.call_args[1]["options"]
+        actions = call_options["props"]["attachments"][0]["actions"]
+        assert any("IDENTITY.md" in a["name"] for a in actions)
+
+    def test_identity_reset_calls_correct_filename(self):
+        plugin, runtime = _make_plugin()
+        runtime.reset_workspace_file.return_value = True
+        msg = _make_message(text="!identity reset")
+        plugin.handle_message(msg)
+        runtime.reset_workspace_file.assert_called_once_with("user1", "IDENTITY.md")
+
+    def test_soul_unknown_subcommand_returns_usage(self):
+        plugin, runtime = _make_plugin()
+        msg = _make_message(text="!soul bogus")
+        plugin.handle_message(msg)
+        runtime.ensure_runtime.assert_not_called()
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "!soul show" in reply
+
+    def test_help_includes_soul_and_identity(self):
+        plugin, runtime = _make_plugin()
+        msg = _make_message(text="!help")
+        plugin.handle_message(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "!soul" in reply
+        assert "!identity" in reply
+
+
 class TestApprovalRequests:
     def test_returns_always_decision(self):
         plugin, _ = _make_plugin()
@@ -277,6 +400,7 @@ class TestApprovalRequests:
         thread.join(timeout=1)
         assert result["decision"] == "always"
         plugin.driver.respond_to_web.assert_called_once()
+        plugin.driver.posts.delete_post.assert_called_once_with("approval-post")
 
     def test_returns_timeout_decision(self):
         plugin, _ = _make_plugin()

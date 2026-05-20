@@ -54,6 +54,24 @@ def _fmt_tool_running(name: str, key: str) -> str:
     return f"_{icon} `{name}`..._"
 
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def patch_post(driver, post_id: str, text: str) -> None:
+    if len(text) > _MM_MAX_POST:
+        text = text[: _MM_MAX_POST - 60] + "\n\n_[ответ обрезан — слишком длинный]_"
+    try:
+        driver.posts.patch_post(post_id, {"message": text})
+    except OSError:
+        logger.error("patch_post_failed", exc_info=True, extra={"post_id": post_id})
+
+
+def patch_props(driver, post_id: str, text: str) -> None:
+    driver.posts.patch_post(post_id, {"props": {"attachments": [{"text": text}]}})
+
+
 def _fmt_tool_done(name: str, key: str, output: str) -> str:
     icon = _TOOL_ICONS.get(name, _TOOL_ICON_DEFAULT)
     out = output.strip()
