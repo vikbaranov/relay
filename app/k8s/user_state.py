@@ -1,0 +1,119 @@
+import logging
+from typing import Callable
+
+from kubernetes import client
+
+from app import metrics
+from app.identity import env_secret_name, identity_configmap_name
+from app.k8s.lifecycle import _workspace_default, _workspace_default_data
+
+logger = logging.getLogger(__name__)
+
+
+class UserStateManager:
+    def __init__(
+        self,
+        core: client.CoreV1Api,
+        apps: client.AppsV1Api,
+        secret: bytes,
+        ns: str,
+        restart_fn: Callable[[str], None],
+    ) -> None:
+        self._core = core
+        self._apps = apps
+        self._secret = secret
+        self._ns = ns
+        self._restart = restart_fn
+
+    def set_user_env(self, mm_user_id: str, key: str, value: str) -> None:
+        sname = env_secret_name(self._secret, mm_user_id)
+        try:
+            self._core.patch_namespaced_secret(sname, self._ns, {"stringData": {key: value}})
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_SET).inc()
+                raise
+            self._core.create_namespaced_secret(
+                self._ns,
+                client.V1Secret(
+                    metadata=client.V1ObjectMeta(name=sname, namespace=self._ns),
+                    string_data={key: value},
+                ),
+            )
+        self._restart(mm_user_id)
+
+    def list_user_envs(self, mm_user_id: str) -> list[str]:
+        sname = env_secret_name(self._secret, mm_user_id)
+        try:
+            secret = self._core.read_namespaced_secret(sname, self._ns)
+            return sorted((secret.data or {}).keys())
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return []
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_LIST).inc()
+            raise
+
+    def delete_user_env(self, mm_user_id: str, key: str) -> bool:
+        sname = env_secret_name(self._secret, mm_user_id)
+        try:
+            secret = self._core.read_namespaced_secret(sname, self._ns)
+            if key not in (secret.data or {}):
+                return False
+            self._core.patch_namespaced_secret(sname, self._ns, {"data": {key: None}})
+            self._restart(mm_user_id)
+            return True
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return False
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_DELETE).inc()
+            raise
+
+    def get_workspace_file(self, mm_user_id: str, filename: str) -> str | None:
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+            content = (cm.data or {}).get(filename)
+            if content is None or content == _workspace_default(filename):
+                return None
+            return content
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return None
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_WORKSPACE_FILE_GET).inc()
+            raise
+
+    def set_workspace_file(self, mm_user_id: str, filename: str, content: str) -> None:
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            self._core.patch_namespaced_config_map(name, self._ns, {"data": {filename: content}})
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_WORKSPACE_FILE_SET).inc()
+                raise
+            self._core.create_namespaced_config_map(
+                self._ns,
+                client.V1ConfigMap(
+                    metadata=client.V1ObjectMeta(name=name, namespace=self._ns),
+                    data={**_workspace_default_data(), filename: content},
+                ),
+            )
+        self._restart(mm_user_id)
+
+    def reset_workspace_file(self, mm_user_id: str, filename: str) -> bool:
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+            default = _workspace_default(filename)
+            data = cm.data or {}
+            if filename not in data:
+                return False
+            if data.get(filename) == default:
+                return False
+            self._core.patch_namespaced_config_map(name, self._ns, {"data": {filename: default}})
+            self._restart(mm_user_id)
+            return True
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return False
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_WORKSPACE_FILE_RESET).inc()
+            raise

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 from kubernetes import client as k8s_client
 
 from app.config import Settings
-from app.identity import object_name
-from app.k8s.runtime import ANNOTATION_LAST_ACTIVITY, RuntimeManager
+from app.identity import identity_configmap_name, object_name
+from app.k8s.runtime import ANNOTATION_LAST_ACTIVITY, RuntimeManager, _workspace_default
 
 
 def _settings(**overrides) -> Settings:
@@ -82,6 +82,27 @@ class TestEnsureRuntime:
         name = object_name(b"s", "user1")
         assert dns == f"{name}.sandbox.svc.cluster.local"
 
+    def test_recreates_shared_configmap_if_deleted_after_first_ensure(self):
+        rm, core, apps = _make_runtime()
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+        core.create_namespaced_config_map.reset_mock()
+
+        def _read_cm(name, ns):
+            if name == "zeroclaw-config":
+                raise k8s_client.exceptions.ApiException(status=404)
+            return MagicMock()
+
+        core.read_namespaced_config_map.side_effect = _read_cm
+        rm.ensure_runtime("user1")
+
+        core.create_namespaced_config_map.assert_called_once()
+        cm_body = core.create_namespaced_config_map.call_args[0][1]
+        assert cm_body.metadata.name == "zeroclaw-config"
+
 
 class TestListIdle:
     def _make_deploy(self, name, last_activity_iso, replicas=1):
@@ -121,3 +142,132 @@ class TestScaleDown:
         apps.patch_namespaced_deployment.assert_called_once()
         body = apps.patch_namespaced_deployment.call_args[0][2]
         assert body["spec"]["replicas"] == 0
+
+
+class TestWorkspaceFiles:
+    def test_get_returns_none_when_configmap_absent(self):
+        rm, core, _ = _make_runtime()
+        core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
+        assert rm.get_workspace_file("user1", "SOUL.md") is None
+
+    def test_get_returns_content_from_configmap(self):
+        rm, core, _ = _make_runtime()
+        cm = MagicMock()
+        cm.data = {"SOUL.md": "custom soul"}
+        core.read_namespaced_config_map.return_value = cm
+        assert rm.get_workspace_file("user1", "SOUL.md") == "custom soul"
+
+    def test_get_returns_none_for_missing_key(self):
+        rm, core, _ = _make_runtime()
+        cm = MagicMock()
+        cm.data = {"IDENTITY.md": "identity"}
+        core.read_namespaced_config_map.return_value = cm
+        assert rm.get_workspace_file("user1", "SOUL.md") is None
+
+    def test_set_patches_existing_configmap(self):
+        rm, core, apps = _make_runtime()
+        rm.set_workspace_file("user1", "SOUL.md", "new soul")
+        core.patch_namespaced_config_map.assert_called_once()
+        _, _, body = core.patch_namespaced_config_map.call_args[0]
+        assert body["data"]["SOUL.md"] == "new soul"
+
+    def test_set_creates_configmap_when_absent(self):
+        rm, core, apps = _make_runtime()
+        core.patch_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
+        rm.set_workspace_file("user1", "SOUL.md", "new soul")
+        core.create_namespaced_config_map.assert_called_once()
+        cm_body = core.create_namespaced_config_map.call_args[0][1]
+        assert cm_body.data["SOUL.md"] == "new soul"
+        assert cm_body.data["IDENTITY.md"] == _workspace_default("IDENTITY.md")
+
+    def test_set_restarts_running_deployment(self):
+        rm, core, apps = _make_runtime()
+        rm.set_workspace_file("user1", "SOUL.md", "new soul")
+        apps.patch_namespaced_deployment.assert_called_once()
+
+    def test_reset_returns_false_when_configmap_absent(self):
+        rm, core, _ = _make_runtime()
+        core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
+        assert rm.reset_workspace_file("user1", "SOUL.md") is False
+
+    def test_reset_returns_false_when_key_absent(self):
+        rm, core, _ = _make_runtime()
+        cm = MagicMock()
+        cm.data = {}
+        core.read_namespaced_config_map.return_value = cm
+        assert rm.reset_workspace_file("user1", "SOUL.md") is False
+
+    def test_reset_patches_key_to_default_and_restarts(self):
+        rm, core, apps = _make_runtime()
+        cm = MagicMock()
+        cm.data = {"SOUL.md": "custom"}
+        core.read_namespaced_config_map.return_value = cm
+        assert rm.reset_workspace_file("user1", "SOUL.md") is True
+        _, _, body = core.patch_namespaced_config_map.call_args[0]
+        assert body["data"]["SOUL.md"] == _workspace_default("SOUL.md")
+        apps.patch_namespaced_deployment.assert_called_once()
+
+    def test_get_returns_none_for_default_content(self):
+        rm, core, _ = _make_runtime()
+        cm = MagicMock()
+        cm.data = {"SOUL.md": _workspace_default("SOUL.md")}
+        core.read_namespaced_config_map.return_value = cm
+        assert rm.get_workspace_file("user1", "SOUL.md") is None
+
+    def test_ensure_identity_configmap_creates_on_first_call(self):
+        rm, core, _ = _make_runtime()
+        core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
+        rm._ensure_identity_configmap("user1")
+        core.create_namespaced_config_map.assert_called_once()
+        s = _settings()
+        cm_body = core.create_namespaced_config_map.call_args[0][1]
+        assert cm_body.metadata.name == identity_configmap_name(b"test-secret", "user1")
+
+    def test_ensure_identity_configmap_skips_if_exists(self):
+        rm, core, _ = _make_runtime()
+        core.read_namespaced_config_map.return_value = MagicMock()
+        rm._ensure_identity_configmap("user1")
+        core.create_namespaced_config_map.assert_not_called()
+
+    def test_ensure_runtime_calls_ensure_identity_configmap(self):
+        rm, core, apps = _make_runtime()
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        read_calls = []
+
+        def _read_cm(name, ns):
+            read_calls.append(name)
+            if "identity" in name:
+                raise k8s_client.exceptions.ApiException(status=404)
+            return MagicMock()
+
+        core.read_namespaced_config_map.side_effect = _read_cm
+        rm.ensure_runtime("user1")
+        identity_name = identity_configmap_name(b"test-secret", "user1")
+        assert any(identity_name in c for c in read_calls)
+
+    def test_deployment_mounts_identity_volume(self):
+        rm, core, apps = _make_runtime()
+        core.read_namespaced_persistent_volume_claim.side_effect = (
+            k8s_client.exceptions.ApiException(status=404)
+        )
+        core.read_namespaced_service.side_effect = k8s_client.exceptions.ApiException(status=404)
+        apps.read_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(status=404)
+
+        rm.ensure_runtime("user1")
+
+        deploy_body = apps.create_namespaced_deployment.call_args[0][1]
+        volumes = deploy_body.spec.template.spec.volumes
+        volume_names = [v.name for v in volumes]
+        assert "identity" in volume_names
+
+        mounts = deploy_body.spec.template.spec.containers[0].volume_mounts
+        mount_paths = [m.mount_path for m in mounts]
+        assert len(mount_paths) == len(set(mount_paths))
+
+        identity_mounts = [m for m in mounts if m.name == "identity"]
+        assert len(identity_mounts) == 2
+        sub_paths = {m.sub_path for m in identity_mounts}
+        assert sub_paths == {"SOUL.md", "IDENTITY.md"}
