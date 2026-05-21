@@ -226,9 +226,7 @@ class TestHandleMessage:
             mock_time.monotonic.side_effect = [100.0, 100.0, 100.0, 100.0, 110.2, 111.0]
             plugin.handle_message(msg)
 
-        patch_messages = [
-            c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list
-        ]
+        patch_messages = [c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list]
         assert "Готов. Заняло 10с" in patch_messages
 
     def test_patches_cold_start_message(self):
@@ -237,9 +235,7 @@ class TestHandleMessage:
         frames = _frames({"type": "done", "full_response": "resp"})
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_message(msg)
-        patch_messages = [
-            c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list
-        ]
+        patch_messages = [c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list]
         assert any("Готов. Заняло" in message for message in patch_messages)
 
     def test_patches_error_on_chat_failure(self):
