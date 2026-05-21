@@ -95,9 +95,7 @@ class LifecycleManager:
                 {
                     "spec": {
                         "template": {
-                            "metadata": {
-                                "annotations": {"kubectl.kubernetes.io/restartedAt": now}
-                            }
+                            "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": now}}
                         }
                     }
                 },
@@ -116,9 +114,7 @@ class LifecycleManager:
     def _ensure_configmap(self) -> None:
         if self._configmap_ensured:
             try:
-                self._core.read_namespaced_config_map(
-                    self._settings.zeroclaw_configmap, self._ns
-                )
+                self._core.read_namespaced_config_map(self._settings.zeroclaw_configmap, self._ns)
                 return
             except client.exceptions.ApiException as exc:
                 if exc.status != 404:
@@ -196,15 +192,11 @@ api_key = "{s.openai_api_key}"
                 if filename not in (cm.data or {})
             }
             if missing_defaults:
-                self._core.patch_namespaced_config_map(
-                    name, self._ns, {"data": missing_defaults}
-                )
+                self._core.patch_namespaced_config_map(name, self._ns, {"data": missing_defaults})
             return
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
-                metrics.k8s_errors_total.labels(
-                    op=metrics.K8S_OP_ENSURE_IDENTITY_CONFIGMAP
-                ).inc()
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_IDENTITY_CONFIGMAP).inc()
                 raise
         data = _workspace_default_data()
         self._core.create_namespaced_config_map(

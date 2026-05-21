@@ -150,9 +150,7 @@ class CommandHandler:
             except Exception:
                 logger.exception("env_list_failed", extra={"mm_user_id": message.user_id})
                 reply = "Ошибка при получении списка переменных."
-            self._driver.create_post(
-                channel_id=message.channel_id, message=reply, root_id=root_id
-            )
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
             return
 
         if sub == "del" and len(parts) == 3:
@@ -169,9 +167,7 @@ class CommandHandler:
                     "env_del_failed key=%s", key, extra={"mm_user_id": message.user_id}
                 )
                 reply = "Ошибка при удалении переменной."
-            self._driver.create_post(
-                channel_id=message.channel_id, message=reply, root_id=root_id
-            )
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
             return
 
         self._driver.create_post(
@@ -198,9 +194,7 @@ class CommandHandler:
                 )
             else:
                 reply = f"**{filename}** (пользовательская версия):\n```\n{content}\n```"
-            self._driver.create_post(
-                channel_id=message.channel_id, message=reply, root_id=root_id
-            )
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
             return
 
         if sub == "set":
@@ -253,9 +247,7 @@ class CommandHandler:
                     extra={"mm_user_id": message.user_id},
                 )
                 reply = f"Ошибка при сбросе `{filename}`."
-            self._driver.create_post(
-                channel_id=message.channel_id, message=reply, root_id=root_id
-            )
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
             return
 
         self._driver.create_post(
