@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import urlparse
 
 _CURSOR = "▌"
@@ -53,8 +54,6 @@ def _fmt_tool_running(name: str, key: str) -> str:
         return f"_{icon} `{name}`: {key}..._"
     return f"_{icon} `{name}`..._"
 
-
-import logging
 
 logger = logging.getLogger(__name__)
 

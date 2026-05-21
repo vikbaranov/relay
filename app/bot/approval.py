@@ -1,14 +1,15 @@
 import logging
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
+from typing import Literal
 
 from app import metrics
 from app.bot.formatting import patch_post, patch_props
 
 logger = logging.getLogger(__name__)
 
-ApprovalDecision = str  # "approve" | "always" | "deny" | "timeout"
+ApprovalDecision = Literal["approve", "deny", "always", "timeout"]
 
 
 class ApprovalManager:

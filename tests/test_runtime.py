@@ -173,7 +173,9 @@ class TestWorkspaceFiles:
 
     def test_set_creates_configmap_when_absent(self):
         rm, core, apps = _make_runtime()
-        core.patch_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
+        core.patch_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(
+            status=404
+        )
         rm.set_workspace_file("user1", "SOUL.md", "new soul")
         core.create_namespaced_config_map.assert_called_once()
         cm_body = core.create_namespaced_config_map.call_args[0][1]
@@ -219,7 +221,6 @@ class TestWorkspaceFiles:
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
         rm._ensure_identity_configmap("user1")
         core.create_namespaced_config_map.assert_called_once()
-        s = _settings()
         cm_body = core.create_namespaced_config_map.call_args[0][1]
         assert cm_body.metadata.name == identity_configmap_name(b"test-secret", "user1")
 
