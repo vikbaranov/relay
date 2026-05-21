@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/vikbaranov/relay/compare/v0.4.0...v0.4.1) (2026-05-21)
+
+
+### Bug Fixes
+
+* kubernetes client version ([eeb86d2](https://github.com/vikbaranov/relay/commit/eeb86d2d744a12f28e09ef3887e0a3c4bc1d8588))
+
 ## [0.4.0](https://github.com/vikbaranov/relay/compare/v0.3.1...v0.4.0) (2026-05-21)
 
 
