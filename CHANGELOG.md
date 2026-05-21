@@ -6,11 +6,4 @@
 ### Features
 
 * add ability to manage SOUL, IDENTITY ([c3c38b2](https://github.com/vikbaranov/relay/commit/c3c38b28e536f5ee18edbbab865b47e4f3bed42d))
-* add ability to manage SOUL, IDENTITY ([28bed97](https://github.com/vikbaranov/relay/commit/28bed9793d3cbb165ff081dc3d8008cdb3451dce))
 * add release please ([#4](https://github.com/vikbaranov/relay/issues/4)) ([fd4af8c](https://github.com/vikbaranov/relay/commit/fd4af8c4055908ef336951bac1d44944b1ba47ce))
-
-
-### Miscellaneous
-
-* remove docs ([36355be](https://github.com/vikbaranov/relay/commit/36355be27a850345108ae0c2924c7aefe0f3b90d))
-* stable version ([b8dea15](https://github.com/vikbaranov/relay/commit/b8dea15d878e11f2290639fefbd6d9deea2318bd))
