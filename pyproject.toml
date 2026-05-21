@@ -4,7 +4,7 @@ version = "0.4.0"
 requires-python = ">=3.11"
 dependencies = [
     "mmpy-bot>=2.2.1",
-    "kubernetes>=28.0",
+    "kubernetes>=28.0,<36",
     "websockets>=12.0",
     "pydantic-settings>=2.0",
     "prometheus-client>=0.20",
