@@ -36,7 +36,7 @@ spec:
               containerPort: 8080
               protocol: TCP
             - name: webhook
-              containerPort: 8579
+              containerPort: {{ .Values.config.lifecycle.webhookHostPort }}
               protocol: TCP
           envFrom:
             - secretRef:

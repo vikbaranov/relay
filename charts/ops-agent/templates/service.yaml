@@ -15,6 +15,6 @@ spec:
       targetPort: health
       protocol: TCP
     - name: webhook
-      port: 8579
+      port: {{ .Values.config.lifecycle.webhookHostPort }}
       targetPort: webhook
       protocol: TCP

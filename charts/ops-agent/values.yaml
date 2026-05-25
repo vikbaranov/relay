@@ -77,7 +77,7 @@ ingress:
   #       - ops-agent.example.com
 
 pdb:
-  enabled: true
+  enabled: false   # Requires replicaCount >= 2 to avoid blocking pod eviction
   minAvailable: 1
 
 podAnnotations: {}
