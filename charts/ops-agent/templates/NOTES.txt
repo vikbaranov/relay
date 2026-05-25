@@ -1,0 +1,18 @@
+ops-agent relay-controller installed successfully.
+
+Prerequisites (must exist before the bot starts):
+  kubectl create namespace {{ .Values.config.k8s.namespace }}
+
+  # Create the global ZeroClaw ConfigMap with your LLM config:
+  kubectl create configmap {{ .Values.config.zeroclaw.configmap }} \
+    --from-file=config.toml=/path/to/your/config.toml \
+    -n {{ .Values.config.k8s.namespace }}
+
+Check rollout status:
+  kubectl rollout status deployment/{{ include "ops-agent.fullname" . }} -n {{ .Release.Namespace }}
+
+Tail logs:
+  kubectl logs -l app.kubernetes.io/name={{ include "ops-agent.name" . }} -n {{ .Release.Namespace }} -f
+
+Webhook endpoint (Mattermost callbacks):
+  https://{{ .Values.ingress.host }}/hooks/
