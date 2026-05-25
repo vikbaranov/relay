@@ -68,7 +68,7 @@ resources:
 ingress:
   enabled: false
   className: nginx
-  host: ""
+  host: ""            # [required if ingress.enabled: true] FQDN for webhook routing
   annotations: {}
   tls: []
   # tls:
