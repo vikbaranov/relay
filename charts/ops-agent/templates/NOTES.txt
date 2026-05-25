@@ -14,5 +14,7 @@ Check rollout status:
 Tail logs:
   kubectl logs -l app.kubernetes.io/name={{ include "ops-agent.name" . }} -n {{ .Release.Namespace }} -f
 
+{{- if and .Values.ingress.enabled .Values.ingress.host }}
 Webhook endpoint (Mattermost callbacks):
   https://{{ .Values.ingress.host }}/hooks/
+{{- end }}
