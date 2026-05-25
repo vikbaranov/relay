@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ops-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ops-agent.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ops-agent.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: health
+      port: 8080
+      targetPort: health
+      protocol: TCP
+    - name: webhook
+      port: 8579
+      targetPort: webhook
+      protocol: TCP
