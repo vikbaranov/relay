@@ -211,7 +211,9 @@ class ZeroClawPlugin(Plugin):
             patch_post(self.driver, post_id, _CURSOR)
 
         extra["post_id"] = post_id
-        self._run_stream(message, scope, root_id, service_dns, post_id, rkey, t0, extra, runtime_key)
+        self._run_stream(
+            message, scope, root_id, service_dns, post_id, rkey, t0, extra, runtime_key
+        )
 
     @listen_to(r"^.*$", direct_only=True)
     def handle_dm(self, message: Message) -> None:

@@ -451,7 +451,9 @@ class TestChannelHandling:
         msg1.channel_id = "channel-abc"
         msg2 = _make_message(user_id="user2", is_direct_message=False)
         msg2.channel_id = "channel-abc"
-        assert plugin._session_scope(msg1, is_channel=True) == plugin._session_scope(msg2, is_channel=True)
+        assert plugin._session_scope(msg1, is_channel=True) == plugin._session_scope(
+            msg2, is_channel=True
+        )
 
     def test_channel_handler_updates_activity_with_channel_id(self):
         plugin, runtime = _make_plugin(is_ready=True)
