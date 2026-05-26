@@ -11,12 +11,12 @@
         "pyproject.toml",
         {
           "type": "yaml",
-          "path": "charts/ops-agent/Chart.yaml",
+          "path": "charts/relay/Chart.yaml",
           "jsonpath": "$.appVersion"
         },
         {
           "type": "yaml",
-          "path": "charts/ops-agent/Chart.yaml",
+          "path": "charts/relay/Chart.yaml",
           "jsonpath": "$.version"
         }
       ]

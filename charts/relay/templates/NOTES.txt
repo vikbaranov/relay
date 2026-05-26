@@ -1,4 +1,4 @@
-ops-agent relay-controller installed successfully.
+relay controller installed successfully.
 
 Prerequisites (must exist before the bot starts):
   kubectl create namespace {{ .Values.config.k8s.namespace }}
@@ -9,10 +9,10 @@ Prerequisites (must exist before the bot starts):
     -n {{ .Values.config.k8s.namespace }}
 
 Check rollout status:
-  kubectl rollout status deployment/{{ include "ops-agent.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl rollout status deployment/{{ include "relay.fullname" . }} -n {{ .Release.Namespace }}
 
 Tail logs:
-  kubectl logs -l app.kubernetes.io/name={{ include "ops-agent.name" . }} -n {{ .Release.Namespace }} -f
+  kubectl logs -l app.kubernetes.io/name={{ include "relay.name" . }} -n {{ .Release.Namespace }} -f
 
 {{- if and .Values.ingress.enabled .Values.ingress.host }}
 Webhook endpoint (Mattermost callbacks):

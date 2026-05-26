@@ -2,10 +2,10 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "ops-agent.fullname" . }}
+  name: {{ include "relay.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "ops-agent.labels" . | nindent 4 }}
+    {{- include "relay.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -26,7 +26,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "ops-agent.fullname" . }}
+                name: {{ include "relay.fullname" . }}
                 port:
                   name: webhook
 {{- end }}

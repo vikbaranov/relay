@@ -27,5 +27,5 @@ jobs:
 
       - name: Package and push chart
         run: |
-          CHART_FILE=$(helm package charts/ops-agent/ | awk '{print $NF}')
+          CHART_FILE=$(helm package charts/relay/ | awk '{print $NF}')
           helm push "$CHART_FILE" oci://ghcr.io/${{ github.repository_owner }}

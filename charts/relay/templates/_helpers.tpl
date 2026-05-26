@@ -1,7 +1,7 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "ops-agent.name" -}}
+{{- define "relay.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
@@ -9,7 +9,7 @@ Expand the name of the chart.
 Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this.
 */}}
-{{- define "ops-agent.fullname" -}}
+{{- define "relay.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -25,16 +25,16 @@ We truncate at 63 chars because some Kubernetes name fields are limited to this.
 {{/*
 Create chart label.
 */}}
-{{- define "ops-agent.chart" -}}
+{{- define "relay.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels
 */}}
-{{- define "ops-agent.labels" -}}
-helm.sh/chart: {{ include "ops-agent.chart" . }}
-{{ include "ops-agent.selectorLabels" . }}
+{{- define "relay.labels" -}}
+helm.sh/chart: {{ include "relay.chart" . }}
+{{ include "relay.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
@@ -44,17 +44,17 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Selector labels
 */}}
-{{- define "ops-agent.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "ops-agent.name" . }}
+{{- define "relay.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "relay.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
 Create the name of the service account to use
 */}}
-{{- define "ops-agent.serviceAccountName" -}}
+{{- define "relay.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "ops-agent.fullname" .) .Values.serviceAccount.name }}
+{{- default (include "relay.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
@@ -63,6 +63,6 @@ Create the name of the service account to use
 {{/*
 Name of the relay-controller config Secret
 */}}
-{{- define "ops-agent.secretName" -}}
-{{- printf "%s-config" (include "ops-agent.fullname" .) }}
+{{- define "relay.secretName" -}}
+{{- printf "%s-config" (include "relay.fullname" .) }}
 {{- end }}

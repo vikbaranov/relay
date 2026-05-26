@@ -1,19 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ops-agent.fullname" . }}
+  name: {{ include "relay.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "ops-agent.labels" . | nindent 4 }}
+    {{- include "relay.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "ops-agent.selectorLabels" . | nindent 6 }}
+      {{- include "relay.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "ops-agent.selectorLabels" . | nindent 8 }}
+        {{- include "relay.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -26,7 +26,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "ops-agent.serviceAccountName" . }}
+      serviceAccountName: {{ include "relay.serviceAccountName" . }}
       containers:
         - name: relay-controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -40,7 +40,7 @@ spec:
               protocol: TCP
           envFrom:
             - secretRef:
-                name: {{ include "ops-agent.secretName" . }}
+                name: {{ include "relay.secretName" . }}
           livenessProbe:
             httpGet:
               path: /healthz

@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/YOUR_ORG/ops-agent
+  repository: ghcr.io/YOUR_ORG/relay
   tag: ""          # defaults to Chart.appVersion when empty
   pullPolicy: Always
   pullSecrets: []
@@ -73,9 +73,9 @@ ingress:
   annotations: {}
   tls: []
   # tls:
-  #   - secretName: ops-agent-tls
+  #   - secretName: relay-tls
   #     hosts:
-  #       - ops-agent.example.com
+  #       - relay.example.com
 
 pdb:
   enabled: false   # Requires replicaCount >= 2 to avoid blocking pod eviction

@@ -2,13 +2,13 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "ops-agent.fullname" . }}
+  name: {{ include "relay.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "ops-agent.labels" . | nindent 4 }}
+    {{- include "relay.labels" . | nindent 4 }}
 spec:
   minAvailable: {{ .Values.pdb.minAvailable }}
   selector:
     matchLabels:
-      {{- include "ops-agent.selectorLabels" . | nindent 6 }}
+      {{- include "relay.selectorLabels" . | nindent 6 }}
 {{- end }}
