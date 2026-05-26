@@ -23,6 +23,10 @@ def identity_configmap_name(secret: bytes, mm_user_id: str) -> str:
     return f"{object_name(secret, mm_user_id)}-identity"
 
 
+def zeroclaw_config_secret_name(secret: bytes, mm_user_id: str) -> str:
+    return f"{object_name(secret, mm_user_id)}-config"
+
+
 def session_id(scope: str, generation: int = 0) -> str:
     """ZeroClaw WS session id for a Mattermost conversation scope."""
     digest = hashlib.sha256(f"{scope}:{generation}".encode()).hexdigest()[:24]

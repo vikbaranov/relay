@@ -166,9 +166,7 @@ local_resource(
     "zeroclaw-runtime-cleanup",
     serve_cmd = """
 trap '
-  kubectl delete deploy,svc,pvc -n sandbox \
-    -l ai.relay.io/part-of=zeroclaw-runtime --ignore-not-found
-  kubectl delete configmap zeroclaw-config -n sandbox --ignore-not-found
+  kubectl delete namespace sandbox --ignore-not-found
   exit 0
 ' TERM INT
 while true; do sleep 86400 & wait $!; done

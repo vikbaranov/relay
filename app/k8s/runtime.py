@@ -172,4 +172,6 @@ class RuntimeManager:
     # ── private method exposed for tests ─────────────────────────────────────
 
     def _ensure_identity_configmap(self, mm_user_id: str) -> None:
-        self._lifecycle._ensure_identity_configmap(mm_user_id)
+        s = self._settings
+        labels = {s.k8s_label_mm_user: mm_user_id}
+        self._lifecycle._ensure_identity_configmap(mm_user_id, labels, {})

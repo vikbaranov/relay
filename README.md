@@ -15,6 +15,7 @@ A Kubernetes-native controller that connects Mattermost chat to [ZeroClaw](https
   - [Approval Workflow](#approval-workflow)
   - [Idle Reaper](#idle-reaper)
   - [User Environment Variables](#user-environment-variables)
+  - [Workspace Files (SOUL & IDENTITY)](#workspace-files-soul--identity)
 - [Configuration](#configuration)
 - [Local Setup](#local-setup)
 - [Production Deployment](#production-deployment)
@@ -40,6 +41,7 @@ graph TD
     subgraph k8s [Kubernetes — sandbox namespace]
         ZC["ZeroClaw pods\none per user"]
         CM[LLM ConfigMap]
+        ICM[Identity ConfigMap\none per user]
         SEC[User env Secrets]
     end
 
@@ -51,6 +53,7 @@ graph TD
     IR -- scale to 0 when idle --> RM
     P -- WebSocket stream --> ZC
     ZC -. mounts .-> CM
+    ZC -. mounts .-> ICM
     ZC -. env vars .-> SEC
 ```
 
@@ -62,19 +65,27 @@ The controller holds no database. All state lives in Kubernetes objects: Deploym
 app/
   main.py              # entry point → run_bot(get_settings())
   config.py            # Settings (Pydantic BaseSettings, reads env/.env)
-  identity.py          # HMAC naming: object_name, pvc_name, session_id
+  identity.py          # HMAC naming: object_name, pvc_name, env_secret_name, identity_configmap_name, session_id
   metrics.py           # Prometheus metric definitions
   logging.py           # JSON structured log formatter
   health.py            # HTTP server on :8080 (/healthz /readyz /metrics)
   bot/
     runner.py          # wires Settings → K8s clients → plugin → mmpy_bot.Bot
-    plugin.py          # ZeroClawPlugin: handle_message, handle_approval, commands
+    plugin.py          # ZeroClawPlugin: handle_message, handle_approval, webhook handlers
+    approval.py        # ApprovalManager: request/resolve approval lifecycle
+    commands.py        # CommandHandler: !new/!clear/!stop/!help/!env/!soul/!identity
+    dialogs.py         # DialogHandler: Mattermost interactive dialogs for env/workspace files
     stream_handler.py  # StreamHandler: frame → Mattermost post text
     formatting.py      # cursor char, update interval, tool icons, truncation
   k8s/
     client.py          # build_k8s_clients() — incluster or kubeconfig mode
-    runtime.py         # RuntimeManager — ensure/scale/reap per-user resources
+    runtime.py         # RuntimeManager — public facade delegating to Lifecycle + UserState
+    lifecycle.py       # LifecycleManager — ensure/scale per-user K8s resources
+    user_state.py      # UserStateManager — env secrets + workspace file CRUD
     reaper.py          # IdleReaper daemon thread
+  workspace/
+    SOUL.md            # Global default SOUL.md injected into every pod
+    IDENTITY.md        # Global default IDENTITY.md injected into every pod
   zeroclaw/
     client.py          # chat_stream() — sync wrapper over async WebSocket
 
@@ -99,9 +110,9 @@ tests/
 ## Request Flow
 
 1. User posts a message in Mattermost.
-2. `ZeroClawPlugin.handle_message()` checks for bot commands (`!new`, `!stop`, `!env`, `!help`). If none match, it proceeds.
+2. `ZeroClawPlugin.handle_message()` checks for bot commands (`!new`, `!clear`, `!stop`, `!env`, `!soul`, `!identity`, `!help`). If none match, it proceeds.
 3. `RuntimeManager.ensure_runtime(mm_user_id)` creates (or re-enables) the user's Deployment, Service, and PVC.
-4. If the pod is not yet ready, a placeholder post is created ("Starting session, please wait…") and `wait_ready()` polls the pod's `/health` endpoint until 200 or timeout. If the pod is already warm, a cursor post (`▌`) is created immediately.
+4. If the pod is not yet ready, a placeholder post is created ("Preparing session…") and `wait_ready()` polls the pod's `/health` endpoint until 200 or timeout. If the pod is already warm, a cursor post (`▌`) is created immediately.
 5. `_run_stream()` derives a session ID from the conversation scope and generation counter, opens a WebSocket to `ws://{service-dns}:{port}/ws/chat?session_id={sid}`, and starts streaming.
 6. Frames from ZeroClaw are processed by `StreamHandler` and rendered back into the Mattermost post in near-real-time (~1 update/second).
 7. When the `done` frame arrives the final message replaces the placeholder and the post is finalized.
@@ -114,8 +125,8 @@ tests/
 | `chunk` | Text fragment appended to the reply with a trailing cursor |
 | `tool_call` | Tool name + icon prepended to the reply |
 | `tool_result` | Tool output appended |
-| `approval_request` | Mattermost message with Approve / Deny buttons posted; stream blocks until user clicks or timeout |
-| `done` | Stream ends, cursor removed, metrics recorded |
+| `approval_request` | Mattermost message with Approve / Always / Deny buttons posted; stream blocks until user clicks or timeout |
+| `done` | Stream ends, cursor removed, token usage logged, metrics recorded |
 | `error` | Error message posted |
 
 ---
@@ -127,41 +138,45 @@ tests/
 `app/identity.py` derives all Kubernetes object names from the Mattermost user ID using HMAC-SHA256:
 
 ```
-object name : zc-{hmac(K8S_NAME_SECRET, mm_user_id)[:20]}
-pvc name    : {object_name}-data
-session id  : mm-{sha256(scope + ":" + generation)[:24]}
-env secret  : {object_name}-env
+object name      : zc-{hmac(K8S_NAME_SECRET, mm_user_id)[:20]}
+pvc name         : {object_name}-data
+env secret       : {object_name}-env
+identity configmap: {object_name}-identity
+session id       : mm-{sha256(scope + ":" + generation)[:24]}
 ```
 
 Names are **deterministic** (survive pod restarts), **non-reversible** without the secret, and **DNS-safe** (lowercase alphanumeric + hyphens). The generation counter in the session ID is what `!new` / `!clear` increments to create a fresh conversation context without touching K8s resources.
 
 ### Runtime Provisioning
 
-`RuntimeManager.ensure_runtime(mm_user_id)` is called on every message and is idempotent:
+`RuntimeManager.ensure_runtime(mm_user_id)` is called on every message and is idempotent. Internally it delegates to `LifecycleManager.ensure_all()`, which creates resources in this order:
 
-1. **ConfigMap** — written once per controller lifecycle. Contains a TOML config for ZeroClaw with the LLM provider, model, and API key. Updating `OPENAI_MODEL` and restarting the controller is sufficient to change the model for all pods.
+1. **Global ConfigMap + provider config Secret** — written once per controller lifecycle. The ConfigMap contains non-sensitive workspace defaults for `SOUL.md` and `IDENTITY.md`. The ZeroClaw `config.toml`, including the provider API key, is stored in a Kubernetes Secret and mounted at `ZEROCLAW_CONFIG_MOUNT`. Updating `OPENAI_MODEL` and restarting the controller is sufficient to change the model for all pods.
 
-2. **PVC** — created once per user (`ReadWriteOnce`, size from `USER_PVC_SIZE`). Persists across pod scale-up/down cycles. Never deleted by the controller.
+2. **Identity ConfigMap** — created once per user (`{name}-identity`). Pre-populated with the global `SOUL.md` and `IDENTITY.md` defaults. Users can override these files via `!soul set` and `!identity set`.
 
-3. **Service** — created once per user (`ClusterIP`). Provides stable in-cluster DNS regardless of pod restarts.
+3. **PVC** — created once per user (`ReadWriteOnce`, size from `USER_PVC_SIZE`). Persists across pod scale-up/down cycles. Never deleted by the controller.
 
-4. **Deployment** — created once per user. If it already exists with `replicas=0` (scaled down by the reaper), it is patched to `replicas=1` and the `last-activity` annotation is updated.
+4. **Service** — created once per user (`ClusterIP`). Provides stable in-cluster DNS regardless of pod restarts.
+
+5. **Deployment** — created once per user. If it already exists with `replicas=0` (scaled down by the reaper), it is patched to `replicas=1` and the `last-activity` annotation is updated.
 
 Each pod runs with a hardened security context: `runAsNonRoot`, no privilege escalation, all capabilities dropped, `seccomp: RuntimeDefault`. The service account token is not automounted.
 
 ```
 Volume mounts per pod:
   data         → PVC at ZEROCLAW_DATA_PATH (/zeroclaw-data/workspace)
-  model-config → ConfigMap at ZEROCLAW_CONFIG_MOUNT (/zeroclaw-data/.zeroclaw/)  [read-only]
+  model-config → Global Secret at ZEROCLAW_CONFIG_MOUNT (/zeroclaw-data/.zeroclaw/)  [read-only]
+  identity     → Per-user Identity ConfigMap, mounts SOUL.md and IDENTITY.md into workspace  [read-only]
   env vars     → Optional Secret {name}-env (user-supplied env, loaded via envFrom)
 ```
 
 Probes:
 | Probe | Config |
 |---|---|
-| Startup | 30 failures × 2 s = up to 60 s for first start |
-| Readiness | initial 5 s, period 5 s |
-| Liveness | initial 30 s, period 15 s, fail after 3 |
+| Startup | 15 failures × 1 s = up to 15 s for first start |
+| Readiness | period 3 s |
+| Liveness | period 5 s, fail after 3 |
 
 ### Message Streaming
 
@@ -172,7 +187,7 @@ Probes:
 3. Yields each incoming JSON frame to the caller.
 4. When an `approval_request` frame arrives it calls the `on_approval_request` callback (which blocks in the plugin), then sends the `approval_response` frame before resuming iteration.
 
-`StreamHandler` accumulates frames into a single post string and throttles Mattermost API updates to at most once per second. A heartbeat thread posts a "Thinking…" indicator if no output arrives for 10 seconds, preventing the user from seeing a stale cursor.
+`StreamHandler` accumulates frames into a single post string and throttles Mattermost API updates to at most once per second. A heartbeat thread posts a "Thinking…" indicator if no output arrives for 10 seconds, preventing the user from seeing a stale cursor. The `done` frame carries token usage (`input_tokens`, `output_tokens`, `model`) which is emitted to Prometheus and logged.
 
 ### Approval Workflow
 
@@ -184,8 +199,8 @@ When ZeroClaw needs to run a potentially dangerous tool it sends an `approval_re
    - **Always allow** → `decision=always`
    - **Deny** → `decision=deny`
 3. Blocks on a `threading.Event` for up to `timeout_secs` (default 120 s).
-4. When the user clicks a button, Mattermost POSTs to `{WEBHOOK_PUBLIC_URL}/hooks/approval`. The webhook handler records the decision, signals the event, and updates the button post with the outcome and the approving user's name.
-5. The unblocked handler sends `{"type": "approval_response", "decision": "…"}` back over the WebSocket. On timeout the decision defaults to `deny`.
+4. When the user clicks a button, Mattermost POSTs to `{WEBHOOK_PUBLIC_URL}/hooks/approval`. The webhook handler records the decision, deletes the button post, and signals the event.
+5. The unblocked handler sends `{"type": "approval_response", "decision": "…"}` back over the WebSocket. On timeout the decision defaults to `deny` and the button post is updated with a timeout notice.
 
 ### Idle Reaper
 
@@ -201,11 +216,25 @@ When ZeroClaw needs to run a potentially dangerous tool it sends an `approval_re
 Users can store arbitrary environment variables that are injected into their ZeroClaw pod via a K8s Secret (`{name}-env`). This is useful for passing API keys to tools running inside the sandbox.
 
 Commands:
-- `!env set KEY` — opens a secure Mattermost dialog (password input field) to enter the value. The value is never echoed in chat.
+- `!env set KEY` — posts a button that opens a secure Mattermost interactive dialog (password input field) to enter the value. The value is never echoed in chat.
 - `!env list` — lists key names (never values).
 - `!env del KEY` — removes the key.
 
 Any change to the Secret triggers a rolling restart of the user's pod (via the `kubectl.kubernetes.io/restartedAt` annotation) so the new value takes effect immediately.
+
+### Workspace Files (SOUL & IDENTITY)
+
+Each ZeroClaw pod receives two workspace files mounted from the per-user identity ConfigMap (`{name}-identity`):
+
+- **SOUL.md** — defines the agent's core principles and personality.
+- **IDENTITY.md** — defines who the agent is.
+
+Global defaults live in `app/workspace/`. Per-user overrides are stored in the identity ConfigMap and take precedence. Changes trigger a rolling restart of the user's pod.
+
+Commands:
+- `!soul show` / `!identity show` — display the current file (or confirm the global default is in use).
+- `!soul set` / `!identity set` — opens a Mattermost interactive dialog with a textarea pre-filled with the current content.
+- `!soul reset` / `!identity reset` — reverts the file to the global default.
 
 ---
 
@@ -237,7 +266,7 @@ All configuration is via environment variables or a `.env` file. Copy `.env.exam
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `OPENAI_API_KEY` | yes | — | API key forwarded to every ZeroClaw pod via ConfigMap |
+| `OPENAI_API_KEY` | yes | — | API key stored in the Kubernetes Secret-mounted ZeroClaw config |
 | `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` | Model name |
 
@@ -248,8 +277,9 @@ All configuration is via environment variables or a `.env` file. Copy `.env.exam
 | `ZEROCLAW_IMAGE` | `ghcr.io/zeroclaw-labs/zeroclaw:latest` | Container image |
 | `ZEROCLAW_PORT` | `42617` | WebSocket port inside the pod |
 | `ZEROCLAW_DATA_PATH` | `/zeroclaw-data/workspace` | Workspace PVC mount path |
-| `ZEROCLAW_CONFIGMAP` | `zeroclaw-config` | Name of the shared config ConfigMap |
-| `ZEROCLAW_CONFIG_MOUNT` | `/zeroclaw-data/.zeroclaw/` | ConfigMap mount path |
+| `ZEROCLAW_CONFIGMAP` | `zeroclaw-identity-default` | Name of the shared non-sensitive workspace defaults ConfigMap |
+| `ZEROCLAW_PROVIDER_CREDENTIALS_SECRET` | `zeroclaw-config-default` | Name of the shared Secret containing ZeroClaw `config.toml` |
+| `ZEROCLAW_CONFIG_MOUNT` | `/zeroclaw-data/.zeroclaw/` | ZeroClaw config mount path |
 | `ZEROCLAW_CPU_REQUEST` | `500m` | CPU request |
 | `ZEROCLAW_CPU_LIMIT` | `2` | CPU limit |
 | `ZEROCLAW_MEMORY_REQUEST` | `1Gi` | Memory request |
@@ -370,6 +400,8 @@ The controller exposes an HTTP server on port **8080**:
 | `relay_pods_reaped_total` | Counter | Pods scaled down by the idle reaper |
 | `relay_k8s_errors_total` | Counter | K8s API errors by operation |
 | `relay_reaper_run_seconds` | Histogram | Idle check duration |
+| `relay_tokens_total` | Counter | LLM tokens consumed by kind (input/output) and model |
+| `relay_llm_request_duration_seconds` | Histogram | Time from stream open to `done` frame |
 
 ---
 
@@ -385,8 +417,8 @@ Tests mock the Kubernetes API client and the Mattermost driver; no cluster or ru
 | File | Coverage |
 |---|---|
 | `test_identity.py` | Naming functions: determinism, DNS safety, uniqueness per user |
-| `test_runtime.py` | RuntimeManager: resource creation, idempotency, scale-up of idle pods, idle listing, scale-down |
-| `test_plugin.py` | ZeroClawPlugin: message handling, thread routing, `!new`/`!clear`/`!stop`/`!help`/`!env` commands |
+| `test_runtime.py` | RuntimeManager: resource creation, idempotency, scale-up of idle pods, identity ConfigMap, workspace file CRUD, idle listing, scale-down |
+| `test_plugin.py` | ZeroClawPlugin: message handling, thread routing, `!new`/`!clear`/`!stop`/`!help`/`!env`/`!soul`/`!identity` commands |
 | `test_zeroclaw_client.py` | WebSocket client: message send, approval_request/response round-trip |
 
 ---
