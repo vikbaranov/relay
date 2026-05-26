@@ -1,0 +1,88 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/YOUR_ORG/relay
+  tag: ""          # defaults to Chart.appVersion when empty
+  pullPolicy: Always
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# All config values are written into the relay-controller Secret (consumed via envFrom).
+# Required fields are marked [required] — helm install will succeed but the pod will
+# crash-loop if these are left empty.
+config:
+  mattermost:
+    url: ""                  # [required] e.g. https://chat.example.com
+    port: 443
+    team: ""                 # [required] Mattermost team name
+    botToken: ""             # [required] Bot account API token
+    botUsername: ""          # [required] Bot account username
+    threadReplies: true
+  k8s:
+    namespace: sandbox       # Namespace where user pods are created
+    mode: incluster          # incluster | kubeconfig
+    kubeconfigPath: ""       # Only used when mode=kubeconfig
+    nameSecret: ""           # [required] 32-byte hex HMAC secret for object naming
+  llm:
+    apiKey: ""               # [required] OpenAI-compatible API key
+    baseUrl: https://api.openai.com/v1
+    model: gpt-4o-mini
+  zeroclaw:
+    image: ghcr.io/zeroclaw-labs/zeroclaw:latest
+    port: 42617
+    dataPath: /zeroclaw-data/workspace
+    configmap: zeroclaw-identity-default
+    providerCredentialsSecret: zeroclaw-config-default
+    configKey: config.toml
+    configMount: /zeroclaw-data/.zeroclaw/
+    cpuRequest: 500m
+    cpuLimit: "2"
+    memoryRequest: 1Gi
+    memoryLimit: 4Gi
+  storage:
+    pvcSize: 5Gi
+    storageClass: ""         # Empty = cluster default
+  lifecycle:
+    idleTimeoutSeconds: 3600
+    podReadyTimeoutSeconds: 120
+    reaperIntervalSeconds: 60
+    webhookHostPort: 8579
+    webhookPublicUrl: ""     # [required] Public URL for Mattermost button callbacks
+  logLevel: 20
+  sslVerify: false
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+ingress:
+  enabled: false
+  className: nginx
+  host: ""            # [required if ingress.enabled: true] FQDN for webhook routing
+  annotations: {}
+  tls: []
+  # tls:
+  #   - secretName: relay-tls
+  #     hosts:
+  #       - relay.example.com
+
+pdb:
+  enabled: false   # Requires replicaCount >= 2 to avoid blocking pod eviction
+  minAvailable: 1
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
