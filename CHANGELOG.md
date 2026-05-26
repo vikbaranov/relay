@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/vikbaranov/relay/compare/v0.4.1...v0.5.0) (2026-05-26)
+
+
+### Features
+
+* add many impovements ([#11](https://github.com/vikbaranov/relay/issues/11)) ([25ca6c1](https://github.com/vikbaranov/relay/commit/25ca6c1ebdcab0ed965ff4505aa6eb5c3a96c156))
+
 ## [0.4.1](https://github.com/vikbaranov/relay/compare/v0.4.0...v0.4.1) (2026-05-21)
 
 
