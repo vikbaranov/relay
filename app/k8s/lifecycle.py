@@ -273,9 +273,7 @@ api_key = "{s.openai_api_key}"
                 extra={"namespace": self._ns, "mm_user_id": mm_user_id},
             )
 
-    def _ensure_identity_configmap(
-        self, mm_user_id: str, labels: dict, annotations: dict
-    ) -> None:
+    def _ensure_identity_configmap(self, mm_user_id: str, labels: dict, annotations: dict) -> None:
         """Create per-user identity ConfigMap pre-populated with global defaults, if absent."""
         name = identity_configmap_name(self._secret, mm_user_id)
         defaults = _workspace_default_data()

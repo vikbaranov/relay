@@ -64,15 +64,11 @@ class TestEnsureRuntime:
         assert pvc_body.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
         assert service_body.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
         assert deploy_body.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
-        assert (
-            deploy_body.spec.template.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
-        )
+        assert deploy_body.spec.template.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
 
     def test_created_identity_configmap_is_labeled_with_mm_user_id(self):
         rm, core, apps = _make_runtime()
-        core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(
-            status=404
-        )
+        core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
