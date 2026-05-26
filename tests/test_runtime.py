@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from kubernetes import client as k8s_client
 
 from app.config import Settings
-from app.identity import identity_configmap_name, object_name
+from app.identity import identity_configmap_name, object_name, zeroclaw_config_secret_name
 from app.k8s.runtime import ANNOTATION_LAST_ACTIVITY, RuntimeManager, _workspace_default
 
 
@@ -47,6 +47,42 @@ class TestEnsureRuntime:
         core.create_namespaced_service.assert_called_once()
         apps.create_namespaced_deployment.assert_called_once()
 
+    def test_created_runtime_resources_are_labeled_with_mm_user_id(self):
+        rm, core, apps = _make_runtime()
+        core.read_namespaced_persistent_volume_claim.side_effect = (
+            k8s_client.exceptions.ApiException(status=404)
+        )
+        core.read_namespaced_service.side_effect = k8s_client.exceptions.ApiException(status=404)
+        apps.read_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(status=404)
+
+        rm.ensure_runtime("user1")
+
+        pvc_body = core.create_namespaced_persistent_volume_claim.call_args[0][1]
+        service_body = core.create_namespaced_service.call_args[0][1]
+        deploy_body = apps.create_namespaced_deployment.call_args[0][1]
+
+        assert pvc_body.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
+        assert service_body.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
+        assert deploy_body.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
+        assert deploy_body.spec.template.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
+
+    def test_created_identity_configmap_is_labeled_with_mm_user_id(self):
+        rm, core, apps = _make_runtime()
+        core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        identity_name = identity_configmap_name(b"test-secret", "user1")
+        identity_cm_body = next(
+            call[0][1]
+            for call in core.create_namespaced_config_map.call_args_list
+            if call[0][1].metadata.name == identity_name
+        )
+        assert identity_cm_body.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
+
     def test_skips_creation_if_resources_exist(self):
         rm, core, apps = _make_runtime()
         existing_deploy = MagicMock()
@@ -66,9 +102,37 @@ class TestEnsureRuntime:
 
         rm.ensure_runtime("user1")
 
-        apps.patch_namespaced_deployment.assert_called_once()
-        patch_body = apps.patch_namespaced_deployment.call_args[0][2]
+        patch_body = next(
+            call[0][2]
+            for call in apps.patch_namespaced_deployment.call_args_list
+            if call[0][2].get("spec", {}).get("replicas") == 1
+        )
         assert patch_body["spec"]["replicas"] == 1
+
+    def test_patches_existing_deployment_to_secret_config_volume(self):
+        rm, core, apps = _make_runtime()
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        existing_deploy.spec.template.spec.volumes = [
+            k8s_client.V1Volume(
+                name="model-config",
+                config_map=k8s_client.V1ConfigMapVolumeSource(name="zeroclaw-identity-default"),
+            )
+        ]
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        patch_body = apps.patch_namespaced_deployment.call_args[0][2]
+        volumes = patch_body["spec"]["template"]["spec"]["volumes"]
+        expected_secret = zeroclaw_config_secret_name(b"test-secret", "user1")
+        assert volumes == [
+            {
+                "name": "model-config",
+                "secret": {"secretName": expected_secret},
+                "configMap": None,
+            }
+        ]
 
     def test_returns_correct_service_dns(self):
         rm, core, apps = _make_runtime()
@@ -82,26 +146,107 @@ class TestEnsureRuntime:
         name = object_name(b"s", "user1")
         assert dns == f"{name}.sandbox.svc.cluster.local"
 
-    def test_recreates_shared_configmap_if_deleted_after_first_ensure(self):
+    def test_shared_configmap_ensured_only_once_per_lifecycle(self):
         rm, core, apps = _make_runtime()
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
         rm.ensure_runtime("user1")
-        core.create_namespaced_config_map.reset_mock()
+        first_replace_count = core.replace_namespaced_config_map.call_count
 
-        def _read_cm(name, ns):
-            if name == "zeroclaw-config":
-                raise k8s_client.exceptions.ApiException(status=404)
-            return MagicMock()
+        rm.ensure_runtime("user1")
+        # Guard prevents a second replace on repeated ensure calls
+        assert core.replace_namespaced_config_map.call_count == first_replace_count
 
-        core.read_namespaced_config_map.side_effect = _read_cm
+    def test_shared_configmap_does_not_contain_openai_api_key(self):
+        rm, core, apps = _make_runtime(_settings(openai_api_key="sk-secret-fixture"))
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
         rm.ensure_runtime("user1")
 
-        core.create_namespaced_config_map.assert_called_once()
-        cm_body = core.create_namespaced_config_map.call_args[0][1]
-        assert cm_body.metadata.name == "zeroclaw-config"
+        cm_body = core.replace_namespaced_config_map.call_args[0][2]
+        assert "config.toml" not in cm_body.data
+        assert "sk-secret-fixture" not in str(cm_body.data)
+
+    def test_creates_per_user_config_secret_with_provider_settings(self):
+        rm, core, apps = _make_runtime(
+            _settings(
+                openai_api_key="sk-secret-fixture",
+                openai_base_url="custom:https://example.test/v1",
+            )
+        )
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'fallback = "custom:https://example.test/v1"' in config_toml
+        assert '[providers.models."custom:https://example.test/v1"]' in config_toml
+        assert 'api_key = "sk-secret-fixture"' in config_toml
+
+    def test_deployment_mounts_per_user_config_secret(self):
+        rm, core, apps = _make_runtime(_settings(openai_api_key="sk-secret-fixture"))
+        core.read_namespaced_persistent_volume_claim.side_effect = (
+            k8s_client.exceptions.ApiException(status=404)
+        )
+        core.read_namespaced_service.side_effect = k8s_client.exceptions.ApiException(status=404)
+        apps.read_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(status=404)
+
+        rm.ensure_runtime("user1")
+
+        deploy_body = apps.create_namespaced_deployment.call_args[0][1]
+        model_config_volume = next(
+            v for v in deploy_body.spec.template.spec.volumes if v.name == "model-config"
+        )
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        assert model_config_volume.secret.secret_name == expected_name
+        assert model_config_volume.config_map is None
+
+    def test_user_config_shell_env_passthrough_reflects_user_envs(self):
+        rm, core, apps = _make_runtime()
+        env_secret = MagicMock()
+        env_secret.data = {"GITHUB_TOKEN": "dG9rZW4=", "MY_KEY": "dmFsdWU="}
+        core.read_namespaced_secret.side_effect = [
+            k8s_client.exceptions.ApiException(status=404),  # provider credentials → create
+            env_secret,  # user env keys read
+            k8s_client.exceptions.ApiException(status=404),  # user zc-config → create
+        ]
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert "GITHUB_TOKEN" in config_toml
+        assert "MY_KEY" in config_toml
+
+    def test_restart_updates_user_config_before_pod_restart(self):
+        rm, core, apps = _make_runtime()
+        env_secret = MagicMock()
+        env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
+        core.read_namespaced_secret.return_value = env_secret
+
+        rm._lifecycle.restart_if_running("user1")
+
+        cname = zeroclaw_config_secret_name(b"test-secret", "user1")
+        patch_call = core.patch_namespaced_secret.call_args
+        assert patch_call[0][0] == cname
+        config_toml = patch_call[0][2]["stringData"]["config.toml"]
+        assert "GITHUB_TOKEN" in config_toml
+        apps.patch_namespaced_deployment.assert_called_once()
 
 
 class TestListIdle:

@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     zeroclaw_image: str = "ghcr.io/zeroclaw-labs/zeroclaw:latest"
     zeroclaw_port: int = 42617
     zeroclaw_data_path: str = "/zeroclaw-data/workspace"
-    zeroclaw_configmap: str = "zeroclaw-config"
+    zeroclaw_configmap: str = "zeroclaw-identity-default"
+    zeroclaw_provider_credentials_secret: str = "zeroclaw-config-default"
     zeroclaw_config_key: str = "config.toml"
     zeroclaw_config_mount: str = "/zeroclaw-data/.zeroclaw/"
     zeroclaw_cpu_request: str = "500m"
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
     zeroclaw_memory_limit: str = "4Gi"
 
     k8s_label_part_of: str = "ai.relay.io/part-of"
-    k8s_annotation_mm_user: str = "ai.relay.io/mm-user-id"
+    k8s_label_mm_user: str = "ai.relay.io/mm-user-id"
     k8s_annotation_last_activity: str = "ai.relay.io/last-activity"
     k8s_part_of_value: str = "zeroclaw-runtime"
 

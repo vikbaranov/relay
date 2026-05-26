@@ -1,3 +1,4 @@
+import json
 import logging
 import pathlib
 from datetime import UTC, datetime
@@ -6,7 +7,13 @@ from kubernetes import client
 
 from app import metrics
 from app.config import Settings
-from app.identity import env_secret_name, identity_configmap_name, object_name, pvc_name
+from app.identity import (
+    env_secret_name,
+    identity_configmap_name,
+    object_name,
+    pvc_name,
+    zeroclaw_config_secret_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +56,7 @@ class LifecycleManager:
         self._secret = secret
         self._ns = ns
         self._configmap_ensured = False
+        self._provider_secret_ensured = False
 
     @staticmethod
     def _now_iso() -> str:
@@ -59,11 +67,18 @@ class LifecycleManager:
         s = self._settings
         name = object_name(self._secret, mm_user_id)
         pvc = pvc_name(self._secret, mm_user_id)
-        labels = {"app": name, s.k8s_label_part_of: s.k8s_part_of_value}
-        annotations = {s.k8s_annotation_mm_user: mm_user_id}
+        labels = {
+            "app": name,
+            s.k8s_label_part_of: s.k8s_part_of_value,
+            s.k8s_label_mm_user: mm_user_id,
+        }
+        annotations: dict = {}
 
         self._ensure_configmap()
-        self._ensure_identity_configmap(mm_user_id)
+        self._ensure_provider_credentials_secret()
+        self._ensure_identity_configmap(mm_user_id, labels, annotations)
+        env_keys = self._get_user_env_keys(mm_user_id)
+        self._ensure_user_zeroclaw_config(mm_user_id, env_keys, labels, annotations)
         self._ensure_pvc(pvc, labels, annotations)
         self._ensure_service(name, labels, annotations)
         self._ensure_deployment(name, pvc, mm_user_id, labels, annotations)
@@ -87,6 +102,23 @@ class LifecycleManager:
 
     def restart_if_running(self, mm_user_id: str) -> None:
         name = object_name(self._secret, mm_user_id)
+        env_keys = self._get_user_env_keys(mm_user_id)
+        s = self._settings
+        cname = zeroclaw_config_secret_name(self._secret, mm_user_id)
+        try:
+            self._core.patch_namespaced_secret(
+                cname,
+                self._ns,
+                {"stringData": {s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys)}},
+            )
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                logger.warning(
+                    "failed to update user zeroclaw config %s",
+                    cname,
+                    exc_info=True,
+                    extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+                )
         now = self._now_iso()
         try:
             self._apps.patch_namespaced_deployment(
@@ -113,21 +145,33 @@ class LifecycleManager:
 
     def _ensure_configmap(self) -> None:
         if self._configmap_ensured:
-            try:
-                self._core.read_namespaced_config_map(self._settings.zeroclaw_configmap, self._ns)
-                return
-            except client.exceptions.ApiException as exc:
-                if exc.status != 404:
-                    metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_CONFIGMAP).inc()
-                    raise
+            return
         s = self._settings
-        toml = f"""\
+        data: dict[str, str] = _workspace_default_data()
+        body = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(name=s.zeroclaw_configmap, namespace=self._ns),
+            data=data,
+        )
+        try:
+            self._core.read_namespaced_config_map(s.zeroclaw_configmap, self._ns)
+            self._core.replace_namespaced_config_map(s.zeroclaw_configmap, self._ns, body)
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_CONFIGMAP).inc()
+                raise
+            self._core.create_namespaced_config_map(self._ns, body)
+            logger.info("created ConfigMap %s", s.zeroclaw_configmap)
+        self._configmap_ensured = True
+
+    def _zeroclaw_config_toml(self, env_keys: list[str]) -> str:
+        s = self._settings
+        return f"""\
 [gateway]
 allow_public_bind = true
 
 [autonomy]
 max_actions_per_hour = 100000
-shell_env_passthrough = ["GITHUB_TOKEN"]
+shell_env_passthrough = {json.dumps(env_keys)}
 allowed_commands = [
     "git",
     "npm",
@@ -165,30 +209,79 @@ fallback = "{s.openai_base_url}"
 model = "{s.openai_model}"
 api_key = "{s.openai_api_key}"
 """
-        data: dict[str, str] = {s.zeroclaw_config_key: toml, **_workspace_default_data()}
-        body = client.V1ConfigMap(
-            metadata=client.V1ObjectMeta(name=s.zeroclaw_configmap, namespace=self._ns),
-            data=data,
+
+    def _ensure_provider_credentials_secret(self) -> None:
+        if self._provider_secret_ensured:
+            return
+        s = self._settings
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=s.zeroclaw_provider_credentials_secret,
+                namespace=self._ns,
+            ),
+            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml([])},
         )
         try:
-            self._core.read_namespaced_config_map(s.zeroclaw_configmap, self._ns)
-            self._core.replace_namespaced_config_map(s.zeroclaw_configmap, self._ns, body)
+            self._core.read_namespaced_secret(s.zeroclaw_provider_credentials_secret, self._ns)
+            self._core.replace_namespaced_secret(
+                s.zeroclaw_provider_credentials_secret, self._ns, body
+            )
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
-                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_CONFIGMAP).inc()
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_PROVIDER_CREDENTIALS).inc()
                 raise
-            self._core.create_namespaced_config_map(self._ns, body)
-            logger.info("created ConfigMap %s", s.zeroclaw_configmap)
-        self._configmap_ensured = True
+            self._core.create_namespaced_secret(self._ns, body)
+            logger.info(
+                "created provider credentials Secret %s", s.zeroclaw_provider_credentials_secret
+            )
+        self._provider_secret_ensured = True
 
-    def _ensure_identity_configmap(self, mm_user_id: str) -> None:
+    def _get_user_env_keys(self, mm_user_id: str) -> list[str]:
+        sname = env_secret_name(self._secret, mm_user_id)
+        try:
+            sec = self._core.read_namespaced_secret(sname, self._ns)
+            return list((sec.data or {}).keys())
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return []
+            raise
+
+    def _ensure_user_zeroclaw_config(
+        self, mm_user_id: str, env_keys: list[str], labels: dict, annotations: dict
+    ) -> None:
+        s = self._settings
+        name = zeroclaw_config_secret_name(self._secret, mm_user_id)
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=name,
+                namespace=self._ns,
+                labels=labels,
+                annotations=annotations,
+            ),
+            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys)},
+        )
+        try:
+            self._core.read_namespaced_secret(name, self._ns)
+            self._core.replace_namespaced_secret(name, self._ns, body)
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
+            self._core.create_namespaced_secret(self._ns, body)
+            logger.info(
+                "created user zeroclaw config Secret %s",
+                name,
+                extra={"namespace": self._ns, "mm_user_id": mm_user_id},
+            )
+
+    def _ensure_identity_configmap(self, mm_user_id: str, labels: dict, annotations: dict) -> None:
         """Create per-user identity ConfigMap pre-populated with global defaults, if absent."""
         name = identity_configmap_name(self._secret, mm_user_id)
+        defaults = _workspace_default_data()
         try:
             cm = self._core.read_namespaced_config_map(name, self._ns)
             missing_defaults = {
                 filename: content
-                for filename, content in _workspace_default_data().items()
+                for filename, content in defaults.items()
                 if filename not in (cm.data or {})
             }
             if missing_defaults:
@@ -198,11 +291,16 @@ api_key = "{s.openai_api_key}"
             if exc.status != 404:
                 metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_IDENTITY_CONFIGMAP).inc()
                 raise
-        data = _workspace_default_data()
+        data = defaults
         self._core.create_namespaced_config_map(
             self._ns,
             client.V1ConfigMap(
-                metadata=client.V1ObjectMeta(name=name, namespace=self._ns),
+                metadata=client.V1ObjectMeta(
+                    name=name,
+                    namespace=self._ns,
+                    labels=labels,
+                    annotations=annotations,
+                ),
                 data=data,
             ),
         )
@@ -272,6 +370,7 @@ api_key = "{s.openai_api_key}"
     ) -> None:
         try:
             deploy = self._apps.read_namespaced_deployment(name, self._ns)
+            self._ensure_deployment_config_volume(name, deploy, mm_user_id)
             if (deploy.spec.replicas or 0) == 0:
                 now = self._now_iso()
                 self._apps.patch_namespaced_deployment(
@@ -365,7 +464,9 @@ api_key = "{s.openai_api_key}"
                 ),
                 client.V1Volume(
                     name="model-config",
-                    config_map=client.V1ConfigMapVolumeSource(name=s.zeroclaw_configmap),
+                    secret=client.V1SecretVolumeSource(
+                        secret_name=zeroclaw_config_secret_name(self._secret, mm_user_id)
+                    ),
                 ),
                 client.V1Volume(
                     name="identity",
@@ -394,4 +495,37 @@ api_key = "{s.openai_api_key}"
             "created Deployment %s",
             name,
             extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+        )
+
+    def _ensure_deployment_config_volume(self, name: str, deploy, mm_user_id: str) -> None:
+        per_user_secret = zeroclaw_config_secret_name(self._secret, mm_user_id)
+        template = getattr(deploy.spec, "template", None)
+        pod_spec = getattr(template, "spec", None)
+        volumes = getattr(pod_spec, "volumes", None)
+        model_config = next((v for v in volumes or [] if v.name == "model-config"), None)
+        if (
+            model_config is not None
+            and model_config.secret is not None
+            and getattr(model_config.secret, "secret_name", None) == per_user_secret
+        ):
+            return
+
+        self._apps.patch_namespaced_deployment(
+            name,
+            self._ns,
+            {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "volumes": [
+                                {
+                                    "name": "model-config",
+                                    "secret": {"secretName": per_user_secret},
+                                    "configMap": None,
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
         )

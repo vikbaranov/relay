@@ -7,7 +7,19 @@
     ".": {
       "release-type": "python",
       "package-name": "relay",
-      "extra-files": ["pyproject.toml"]
+      "extra-files": [
+        "pyproject.toml",
+        {
+          "type": "yaml",
+          "path": "charts/ops-agent/Chart.yaml",
+          "jsonpath": "$.appVersion"
+        },
+        {
+          "type": "yaml",
+          "path": "charts/ops-agent/Chart.yaml",
+          "jsonpath": "$.version"
+        }
+      ]
     }
   },
   "changelog-sections": [

@@ -61,9 +61,11 @@ class ZeroClawPlugin(Plugin):
             return message.root_id or message.id
         return ""
 
-    def _session_scope(self, message: Message) -> str:
+    def _session_scope(self, message: Message, is_channel: bool = False) -> str:
         root_id = self._reply_root_id(message)
         reply_target = f"{message.channel_id}:{root_id}" if root_id else message.channel_id
+        if is_channel:
+            return f"mattermost_channel_{reply_target}"
         return f"mattermost_{reply_target}_{message.user_id}"
 
     # ── webhook handlers ───────────────────────────────────────────────────────
@@ -106,6 +108,7 @@ class ZeroClawPlugin(Plugin):
         rkey: str,
         t0: float,
         extra: dict,
+        runtime_key: str,
     ) -> None:
         state = self._sessions.setdefault(scope, _SessionState())
         sid = session_id(scope, state.generation)
@@ -149,13 +152,12 @@ class ZeroClawPlugin(Plugin):
             heartbeat_stop.set()
             hb.join(timeout=1)
 
-        self._runtime.update_last_activity(message.user_id)
+        self._runtime.update_last_activity(runtime_key)
         metrics.messages_total.labels(outcome="success").inc()
         metrics.message_duration.labels(outcome="success").observe(time.monotonic() - t0)
         logger.info("message_done", extra=extra)
 
-    @listen_to(r"^.*$")
-    def handle_message(self, message: Message) -> None:
+    def _handle_request(self, message: Message, runtime_key: str, is_channel: bool = False) -> None:
         if self.driver is None or not message.text or not message.text.strip():
             return
 
@@ -163,18 +165,17 @@ class ZeroClawPlugin(Plugin):
         if bot_user_id and message.user_id == bot_user_id:
             return
 
-        mm_user_id: str = message.user_id
-        root_id = self._reply_root_id(message)
-        scope = self._session_scope(message)
+        root_id = (message.root_id or message.id) if is_channel else self._reply_root_id(message)
+        scope = self._session_scope(message, is_channel=is_channel)
 
         if self._commands.handle(message, scope, root_id):
             return
 
-        rkey = object_name(self._secret, mm_user_id)
+        rkey = object_name(self._secret, runtime_key)
         t0 = time.monotonic()
         extra = {
             "runtime_key": rkey,
-            "mm_user_id": mm_user_id,
+            "mm_user_id": message.user_id,
             "channel_id": message.channel_id,
         }
         logger.info("message_received", extra=extra)
@@ -187,7 +188,7 @@ class ZeroClawPlugin(Plugin):
         post_id = post["id"]
 
         t_ensure = time.monotonic()
-        service_dns = self._runtime.ensure_runtime(mm_user_id)
+        service_dns = self._runtime.ensure_runtime(runtime_key)
         metrics.ensure_runtime_seconds.observe(time.monotonic() - t_ensure)
 
         if not self._runtime.is_ready(service_dns):
@@ -210,5 +211,16 @@ class ZeroClawPlugin(Plugin):
             patch_post(self.driver, post_id, _CURSOR)
 
         extra["post_id"] = post_id
-        self._runtime.update_last_activity(mm_user_id)
-        self._run_stream(message, scope, root_id, service_dns, post_id, rkey, t0, extra)
+        self._run_stream(
+            message, scope, root_id, service_dns, post_id, rkey, t0, extra, runtime_key
+        )
+
+    @listen_to(r"^.*$", direct_only=True)
+    def handle_dm(self, message: Message) -> None:
+        self._handle_request(message, runtime_key=message.user_id)
+
+    @listen_to(r"^.*$", needs_mention=True)
+    def handle_channel_mention(self, message: Message) -> None:
+        if message.is_direct_message:
+            return
+        self._handle_request(message, runtime_key=message.channel_id, is_channel=True)

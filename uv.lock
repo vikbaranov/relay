@@ -1565,7 +1565,7 @@ wheels = [
 
 [[package]]
 name = "relay"
-version = "0.1.0"
+version = "0.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "kubernetes" },
@@ -1588,7 +1588,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "kubernetes", specifier = ">=28.0" },
+    { name = "kubernetes", specifier = ">=28.0,<36" },
     { name = "mmpy-bot", specifier = ">=2.2.1" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pydantic-settings", specifier = ">=2.0" },
