@@ -18,6 +18,7 @@ A Kubernetes-native controller that connects Mattermost chat to [ZeroClaw](https
   - [Workspace Files (SOUL & IDENTITY)](#workspace-files-soul--identity)
 - [Configuration](#configuration)
 - [Local Setup](#local-setup)
+  - [Pre-commit hooks](#pre-commit-hooks)
 - [Production Deployment](#production-deployment)
 - [Health & Metrics](#health--metrics)
 - [Tests](#tests)
@@ -307,6 +308,21 @@ All configuration is via environment variables or a `.env` file. Copy `.env.exam
 ---
 
 ## Local Setup
+
+### Pre-commit hooks
+
+Install once after cloning:
+
+```bash
+uv sync --group dev
+uv run pre-commit install
+```
+
+From then on, every `git commit` automatically runs ruff (lint + format), YAML/TOML validation, trailing-whitespace cleanup, merge-conflict detection, and a private-key guard. To run all hooks manually:
+
+```bash
+uv run pre-commit run --all-files
+```
 
 ### Tilt + kind
 
