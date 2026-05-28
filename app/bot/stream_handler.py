@@ -7,10 +7,13 @@ from app import metrics
 from app.bot.formatting import (
     _CURSOR,
     _HEARTBEAT_INTERVAL,
+    _THINKING_BUFFER_MAX,
+    _THINKING_PREVIEW_MAX,
     _UPDATE_INTERVAL,
     _fmt_tool_done,
     _fmt_tool_running,
     _key_arg,
+    _tail,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,17 @@ class StreamHandler:
         self._last_update = t
         self._stream_start = t
         self._pending_tool_start: dict[str, tuple[str, float]] = {}
+        self._thinking = ""
+
+    def _patch_if_due(self, *, cursor: bool = False) -> None:
+        now = time.monotonic()
+        if now - self._last_update >= _UPDATE_INTERVAL:
+            self._patch(self.render(cursor=cursor))
+            self._last_update = now
+
+    def _clear_stream_chunks(self) -> None:
+        self._chunks.clear()
+        self._current_tool = ""
 
     def render(self, cursor: bool = False) -> str:
         parts = []
@@ -37,12 +51,14 @@ class StreamHandler:
         text = "".join(self._chunks)
         if text:
             parts.append(text + (_CURSOR if cursor else ""))
+        elif self._thinking and not all_tools:
+            parts.append(f"_💭 {_tail(self._thinking, _THINKING_PREVIEW_MAX)}{_CURSOR if cursor else ''}_")
         return "\n\n".join(parts) if parts else ""
 
     def heartbeat(self, stop: threading.Event) -> None:
         tick = 0
         while not stop.wait(timeout=_HEARTBEAT_INTERVAL):
-            if self._tool_log or self._current_tool or self._chunks:
+            if self._tool_log or self._current_tool or self._chunks or self._thinking:
                 continue
             elapsed = int(time.monotonic() - self._stream_start)
             dots = "." * (tick % 3 + 1)
@@ -54,10 +70,7 @@ class StreamHandler:
         if ftype == "chunk":
             self._chunks.append(frame.get("content", ""))
             self._current_tool = ""
-            now = time.monotonic()
-            if now - self._last_update >= _UPDATE_INTERVAL:
-                self._patch(self.render(cursor=True))
-                self._last_update = now
+            self._patch_if_due(cursor=True)
         elif ftype == "tool_call":
             tool_name = frame.get("name", "?")
             call_id = frame.get("id") or tool_name
@@ -99,12 +112,7 @@ class StreamHandler:
         elif ftype == "done":
             final = frame.get("full_response") or "".join(self._chunks)
             tool_section = "\n".join(self._tool_log) if self._tool_log else ""
-            if tool_section and final:
-                self._patch(f"{tool_section}\n\n{final}")
-            elif tool_section:
-                self._patch(tool_section)
-            else:
-                self._patch(final)
+            self._patch(final if final else tool_section)
             model = frame.get("model") or "unknown"
             input_tokens = frame.get("input_tokens") or 0
             output_tokens = frame.get("output_tokens") or 0
@@ -123,6 +131,13 @@ class StreamHandler:
             return True
         elif ftype == "error":
             raise RuntimeError(f"ZeroClaw error: {frame.get('message')}")
+        elif ftype == "thinking":
+            self._thinking += frame.get("content", "")
+            if len(self._thinking) > _THINKING_BUFFER_MAX:
+                self._thinking = self._thinking[-_THINKING_BUFFER_MAX:]
+            self._patch_if_due(cursor=True)
+        elif ftype == "chunk_reset":
+            self._clear_stream_chunks()
         elif ftype in ("session_start", "approval_request"):
             pass
         elif ftype is not None:

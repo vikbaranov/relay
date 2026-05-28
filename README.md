@@ -100,8 +100,8 @@ deploy/                # Production K8s manifests
 
 tests/
   test_identity.py
-  test_runtime.py      # mocked K8s API
-  test_plugin.py       # mocked WebSocket + Mattermost driver
+  test_runtime.py         # mocked K8s API
+  test_plugin.py          # mocked WebSocket + Mattermost driver
   test_zeroclaw_client.py
 ```
 
@@ -411,15 +411,6 @@ The controller exposes an HTTP server on port **8080**:
 uv sync --group dev
 uv run pytest tests/ -v
 ```
-
-Tests mock the Kubernetes API client and the Mattermost driver; no cluster or running Mattermost instance required.
-
-| File | Coverage |
-|---|---|
-| `test_identity.py` | Naming functions: determinism, DNS safety, uniqueness per user |
-| `test_runtime.py` | RuntimeManager: resource creation, idempotency, scale-up of idle pods, identity ConfigMap, workspace file CRUD, idle listing, scale-down |
-| `test_plugin.py` | ZeroClawPlugin: message handling, thread routing, `!new`/`!clear`/`!stop`/`!help`/`!env`/`!soul`/`!identity` commands |
-| `test_zeroclaw_client.py` | WebSocket client: message send, approval_request/response round-trip |
 
 ---
 

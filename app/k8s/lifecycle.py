@@ -24,6 +24,34 @@ PART_OF_VALUE = "zeroclaw-runtime"
 _WORKSPACE_DEFAULTS = pathlib.Path(__file__).parent.parent / "workspace"
 WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md")
 
+_ALLOWED_COMMANDS = [
+    "git",
+    "ls",
+    "cat",
+    "grep",
+    "find",
+    "echo",
+    "pwd",
+    "wc",
+    "head",
+    "tail",
+    "date",
+    "df",
+    "du",
+    "uname",
+    "uptime",
+    "hostname",
+    "gh",
+    "rm",
+    "mv",
+    "cp",
+    "mkdir",
+    "touch",
+    "bash",
+    "curl",
+    "zeroclaw",
+]
+
 
 def _workspace_default(filename: str) -> str | None:
     path = _WORKSPACE_DEFAULTS / filename
@@ -165,50 +193,38 @@ class LifecycleManager:
 
     def _zeroclaw_config_toml(self, env_keys: list[str]) -> str:
         s = self._settings
-        return f"""\
-[gateway]
-allow_public_bind = true
-
-[autonomy]
-max_actions_per_hour = 100000
-shell_env_passthrough = {json.dumps(env_keys)}
-allowed_commands = [
-    "git",
-    "npm",
-    "cargo",
-    "ls",
-    "cat",
-    "grep",
-    "find",
-    "echo",
-    "pwd",
-    "wc",
-    "head",
-    "tail",
-    "date",
-    "df",
-    "du",
-    "uname",
-    "uptime",
-    "hostname",
-    "python",
-    "python3",
-    "pip",
-    "node",
-    "gh",
-]
-
-[agent]
-max_tool_iterations = 150
-command_timeout = 180
-
-[providers]
-fallback = "{s.openai_base_url}"
-
-[providers.models."{s.openai_base_url}"]
-model = "{s.openai_model}"
-api_key = "{s.openai_api_key}"
-"""
+        allowed_commands = json.dumps(_ALLOWED_COMMANDS, indent=4)
+        sections = [
+            "[gateway]",
+            "allow_public_bind = true",
+            "",
+            "[autonomy]",
+            'level = "full"',
+            "max_actions_per_hour = 100000",
+            "",
+            f"shell_env_passthrough = {json.dumps(env_keys)}",
+            f"allowed_commands = {allowed_commands}",
+            "",
+            "[agent]",
+            "max_tool_iterations = 150",
+            "command_timeout = 180",
+            "",
+            "[http_request]",
+            "allow_private_hosts = true",
+            "",
+            "[web_fetch]",
+            'allowed_domain = ["*"]',
+            'allowed_private_hosts = ["192.168.100.231","192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"]',
+            "",
+            "[providers]",
+            f'fallback = "{s.openai_base_url}"',
+            "",
+            f'[providers.models."{s.openai_base_url}"]',
+            f'model = "{s.openai_model}"',
+            f'api_key = "{s.openai_api_key}"',
+            "",
+        ]
+        return "\n".join(sections)
 
     def _ensure_provider_credentials_secret(self) -> None:
         if self._provider_secret_ensured:
