@@ -52,7 +52,8 @@ class StreamHandler:
         if text:
             parts.append(text + (_CURSOR if cursor else ""))
         elif self._thinking and not all_tools:
-            parts.append(f"_💭 {_tail(self._thinking, _THINKING_PREVIEW_MAX)}{_CURSOR if cursor else ''}_")
+            cursor_or_empty = _CURSOR if cursor else ""
+            parts.append(f"_💭 {_tail(self._thinking, _THINKING_PREVIEW_MAX)}{cursor_or_empty}_")
         return "\n\n".join(parts) if parts else ""
 
     def heartbeat(self, stop: threading.Event) -> None:

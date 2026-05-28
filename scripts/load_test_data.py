@@ -4,30 +4,37 @@
 import json
 import random
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 try:
     import httpx as _http
+
     def _post(url, json_body, verify):
         r = _http.post(url, json=json_body, verify=verify, timeout=10)
         r.raise_for_status()
         return r.json()
+
     def _put(url, json_body, verify):
         r = _http.put(url, json=json_body, verify=verify, timeout=10)
         r.raise_for_status()
         return r.json()
 except ImportError:
-    import urllib.request, urllib.error
+    import urllib.error
+    import urllib.request
+
     def _request(method, url, json_body, verify):
         data = json.dumps(json_body).encode()
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Content-Type", "application/json")
         import ssl
+
         ctx = ssl.create_default_context() if verify else ssl._create_unverified_context()
         with urllib.request.urlopen(req, context=ctx) as resp:
             return json.loads(resp.read())
+
     def _post(url, json_body, verify):
         return _request("POST", url, json_body, verify)
+
     def _put(url, json_body, verify):
         return _request("PUT", url, json_body, verify)
 
@@ -83,25 +90,28 @@ def random_message(level: str) -> str:
 
 
 def generate_docs(count: int = 200) -> list[dict]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     docs = []
     for i in range(count):
         ts = now - timedelta(minutes=count - i, seconds=random.randint(0, 59))
         level = random.choices(LEVELS, weights=[50, 30, 20, 10, 5])[0]
         service = random.choice(SERVICES)
         pod = random.choice([p for p in PODS if p.startswith(service)])
-        docs.append({
-            "@timestamp": ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "level": level,
-            "service": service,
-            "namespace": random.choice(NAMESPACES),
-            "pod": pod,
-            "message": random_message(level),
-            "response_time_ms": random.randint(10, 5000) if level != "ERROR" else None,
-            "status_code": random.choice([200, 200, 200, 201, 400, 404, 500])
-                if level != "INFO" else random.choice([200, 200, 201]),
-            "request_id": f"req-{random.randint(100000, 999999)}",
-        })
+        docs.append(
+            {
+                "@timestamp": ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "level": level,
+                "service": service,
+                "namespace": random.choice(NAMESPACES),
+                "pod": pod,
+                "message": random_message(level),
+                "response_time_ms": random.randint(10, 5000) if level != "ERROR" else None,
+                "status_code": random.choice([200, 200, 200, 201, 400, 404, 500])
+                if level != "INFO"
+                else random.choice([200, 200, 201]),
+                "request_id": f"req-{random.randint(100000, 999999)}",
+            }
+        )
     return docs
 
 
@@ -140,6 +150,7 @@ def bulk_index(docs: list[dict]) -> None:
 
     try:
         import httpx
+
         resp = httpx.post(
             f"{OPENSEARCH_URL}/_bulk",
             content=body,
@@ -150,7 +161,10 @@ def bulk_index(docs: list[dict]) -> None:
         resp.raise_for_status()
         result = resp.json()
     except ImportError:
-        import urllib.request, urllib.error, ssl
+        import ssl
+        import urllib.error
+        import urllib.request
+
         data = body.encode()
         req = urllib.request.Request(f"{OPENSEARCH_URL}/_bulk", data=data, method="POST")
         req.add_header("Content-Type", "application/x-ndjson")

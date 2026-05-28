@@ -214,7 +214,8 @@ class LifecycleManager:
             "",
             "[web_fetch]",
             'allowed_domain = ["*"]',
-            'allowed_private_hosts = ["192.168.100.231","192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"]',
+            'allowed_private_hosts = ["192.168.100.231", "192.168.0.0/16",'
+            ' "172.16.0.0/12", "10.0.0.0/8"]',
             "",
             "[providers]",
             f'fallback = "{s.openai_base_url}"',
