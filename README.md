@@ -18,6 +18,7 @@ A Kubernetes-native controller that connects Mattermost chat to [ZeroClaw](https
   - [Workspace Files (SOUL & IDENTITY)](#workspace-files-soul--identity)
 - [Configuration](#configuration)
 - [Local Setup](#local-setup)
+  - [Pre-commit hooks](#pre-commit-hooks)
 - [Production Deployment](#production-deployment)
 - [Health & Metrics](#health--metrics)
 - [Tests](#tests)
@@ -100,8 +101,8 @@ deploy/                # Production K8s manifests
 
 tests/
   test_identity.py
-  test_runtime.py      # mocked K8s API
-  test_plugin.py       # mocked WebSocket + Mattermost driver
+  test_runtime.py         # mocked K8s API
+  test_plugin.py          # mocked WebSocket + Mattermost driver
   test_zeroclaw_client.py
 ```
 
@@ -308,6 +309,21 @@ All configuration is via environment variables or a `.env` file. Copy `.env.exam
 
 ## Local Setup
 
+### Pre-commit hooks
+
+Install once after cloning:
+
+```bash
+uv sync --group dev
+uv run pre-commit install
+```
+
+From then on, every `git commit` automatically runs ruff (lint + format), YAML/TOML validation, trailing-whitespace cleanup, merge-conflict detection, and a private-key guard. To run all hooks manually:
+
+```bash
+uv run pre-commit run --all-files
+```
+
 ### Tilt + kind
 
 End-to-end local development with real pod provisioning.
@@ -411,15 +427,6 @@ The controller exposes an HTTP server on port **8080**:
 uv sync --group dev
 uv run pytest tests/ -v
 ```
-
-Tests mock the Kubernetes API client and the Mattermost driver; no cluster or running Mattermost instance required.
-
-| File | Coverage |
-|---|---|
-| `test_identity.py` | Naming functions: determinism, DNS safety, uniqueness per user |
-| `test_runtime.py` | RuntimeManager: resource creation, idempotency, scale-up of idle pods, identity ConfigMap, workspace file CRUD, idle listing, scale-down |
-| `test_plugin.py` | ZeroClawPlugin: message handling, thread routing, `!new`/`!clear`/`!stop`/`!help`/`!env`/`!soul`/`!identity` commands |
-| `test_zeroclaw_client.py` | WebSocket client: message send, approval_request/response round-trip |
 
 ---
 

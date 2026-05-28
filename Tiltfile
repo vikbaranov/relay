@@ -159,14 +159,16 @@ k8s_resource(
 )
 
 # ── Cleanup: delete per-user zeroclaw resources on tilt down ─────────────────
-# runtime.py creates Deployments/Services/PVCs/ConfigMap at request time; Tilt
-# never sees them via k8s_yaml, so they must be deleted explicitly on teardown.
-# Tilt sends SIGTERM to serve_cmd processes during `tilt down` — the trap fires.
+# runtime.py creates Deployments/Services/PVCs/ConfigMaps/Secrets at request
+# time; Tilt never sees them via k8s_yaml, so they must be deleted explicitly
+# on teardown. Tilt sends SIGTERM to serve_cmd processes during `tilt down` —
+# the trap fires and removes all dynamic resources while keeping the namespace.
 local_resource(
     "zeroclaw-runtime-cleanup",
     serve_cmd = """
 trap '
-  kubectl delete namespace sandbox --ignore-not-found
+  kubectl delete pods,deployments,services,persistentvolumeclaims,configmaps,secrets \
+    -l ai.relay.io/part-of=zeroclaw-runtime -n sandbox --ignore-not-found
   exit 0
 ' TERM INT
 while true; do sleep 86400 & wait $!; done

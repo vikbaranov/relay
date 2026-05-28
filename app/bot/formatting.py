@@ -6,6 +6,8 @@ _UPDATE_INTERVAL = 1.0
 _RESULT_MAX = 150
 _HEARTBEAT_INTERVAL = 10.0
 _MM_MAX_POST = 10_000
+_THINKING_PREVIEW_MAX = 400
+_THINKING_BUFFER_MAX = _THINKING_PREVIEW_MAX * 2
 
 _TOOL_ICONS: dict[str, str] = {
     "web_search_tool": "🔍",
@@ -34,6 +36,10 @@ _TOOL_ICON_DEFAULT = "⚙️"
 
 def _truncate(s: str, n: int) -> str:
     return s[: n - 3] + "..." if len(s) > n else s
+
+
+def _tail(s: str, n: int) -> str:
+    return s[-n:] if len(s) > n else s
 
 
 def _key_arg(name: str, args: dict | None) -> str:
