@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/vikbaranov/relay/compare/v0.5.0...v0.6.0) (2026-05-28)
+
+
+### Features
+
+* refactor streaming, add thinking ([#15](https://github.com/vikbaranov/relay/issues/15)) ([6d4ff94](https://github.com/vikbaranov/relay/commit/6d4ff947309dc744568bc7cf745d5798a76a1ab7))
+
+
+### Bug Fixes
+
+* change project name ([#13](https://github.com/vikbaranov/relay/issues/13)) ([5e81f71](https://github.com/vikbaranov/relay/commit/5e81f71242a1bb9b13741740d584918a9704a419))
+
 ## [0.5.0](https://github.com/vikbaranov/relay/compare/v0.4.1...v0.5.0) (2026-05-26)
 
 
