@@ -18,11 +18,13 @@ class CommandHandler:
         get_driver: Callable,
         runtime,
         base_url: str,
+        allowed_models: list[str],
         sessions: dict,
     ) -> None:
         self._get_driver = get_driver
         self._runtime = runtime
         self._base_url = base_url
+        self._allowed_models = allowed_models
         self._sessions = sessions
 
     @property
@@ -53,6 +55,10 @@ class CommandHandler:
                     "- `!env set KEY` — сохранить переменную окружения\n"
                     "- `!env list` — список переменных окружения\n"
                     "- `!env del KEY` — удалить переменную окружения\n"
+                    "- `!model list` — список доступных моделей\n"
+                    "- `!model show` — показать текущую модель\n"
+                    "- `!model set MODEL` — выбрать модель\n"
+                    "- `!model reset` — сбросить модель к умолчанию\n"
                     "- `!soul show` — показать текущий SOUL.md\n"
                     "- `!soul set` — изменить SOUL.md\n"
                     "- `!soul reset` — сбросить SOUL.md к умолчанию\n"
@@ -84,6 +90,10 @@ class CommandHandler:
 
         if command == "!env":
             self._handle_env(message, root_id)
+            return True
+
+        if command == "!model":
+            self._handle_model(message, root_id)
             return True
 
         if command == "!soul":
@@ -177,6 +187,78 @@ class CommandHandler:
                 "- `!env set KEY` — сохранить переменную через защищённый диалог\n"
                 "- `!env list` — список переменных\n"
                 "- `!env del KEY` — удалить переменную"
+            ),
+            root_id=root_id,
+        )
+
+    def _handle_model(self, message, root_id: str) -> None:
+        parts = message.text.strip().split(maxsplit=2)
+        sub = parts[1].lower() if len(parts) > 1 else "show"
+        allowed = self._allowed_models
+
+        if sub == "show":
+            try:
+                model = self._runtime.get_user_model(message.user_id)
+                reply = f"Текущая модель: `{model}`"
+            except Exception:
+                logger.exception("model_show_failed", extra={"mm_user_id": message.user_id})
+                reply = "Ошибка при получении текущей модели."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "list":
+            try:
+                current = self._runtime.get_user_model(message.user_id)
+                lines = [
+                    f"- `{model}`" + (" — текущая" if model == current else "") for model in allowed
+                ]
+                reply = "Доступные модели:\n" + "\n".join(lines)
+            except Exception:
+                logger.exception("model_list_failed", extra={"mm_user_id": message.user_id})
+                reply = "Ошибка при получении списка моделей."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "set" and len(parts) == 3:
+            model = parts[2]
+            try:
+                saved = self._runtime.set_user_model(message.user_id, model)
+                if saved:
+                    reply = f"✅ Модель `{model}` сохранена. Сессия будет перезапущена."
+                else:
+                    reply = f"Модель `{model}` недоступна. Доступные модели: " + ", ".join(
+                        f"`{m}`" for m in allowed
+                    )
+            except Exception:
+                logger.exception(
+                    "model_set_failed model=%s", model, extra={"mm_user_id": message.user_id}
+                )
+                reply = "Ошибка при сохранении модели."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "reset":
+            try:
+                changed = self._runtime.reset_user_model(message.user_id)
+                reply = (
+                    f"✅ Модель сброшена к `{allowed[0]}`. Сессия будет перезапущена."
+                    if changed
+                    else f"Модель уже использует значение по умолчанию: `{allowed[0]}`."
+                )
+            except Exception:
+                logger.exception("model_reset_failed", extra={"mm_user_id": message.user_id})
+                reply = "Ошибка при сбросе модели."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        self._driver.create_post(
+            channel_id=message.channel_id,
+            message=(
+                "Использование:\n"
+                "- `!model list` — список доступных моделей\n"
+                "- `!model show` — показать текущую модель\n"
+                "- `!model set MODEL` — выбрать модель\n"
+                "- `!model reset` — сбросить модель к умолчанию"
             ),
             root_id=root_id,
         )

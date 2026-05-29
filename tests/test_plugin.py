@@ -15,6 +15,7 @@ def _settings() -> Settings:
         mattermost_bot_token="tok",
         mattermost_bot_username="bot",
         mattermost_thread_replies=True,
+        allowed_models="gpt-4o-mini,gpt-4o",
         k8s_name_secret="test-secret",
         k8s_mode="kubeconfig",
     )
@@ -368,6 +369,76 @@ class TestSoulIdentityCommands:
         reply = plugin.driver.create_post.call_args[1]["message"]
         assert "!soul" in reply
         assert "!identity" in reply
+
+
+class TestModelCommands:
+    def test_model_show_returns_current_model(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_user_model.return_value = "gpt-4o"
+        msg = _make_message(text="!model show")
+
+        plugin.handle_dm(msg)
+
+        runtime.ensure_runtime.assert_not_called()
+        runtime.get_user_model.assert_called_once_with("user1")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "gpt-4o" in reply
+
+    def test_model_list_marks_current_model(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_user_model.return_value = "gpt-4o"
+        msg = _make_message(text="!model list")
+
+        plugin.handle_dm(msg)
+
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "gpt-4o-mini" in reply
+        assert "gpt-4o" in reply
+        assert "current" in reply.lower() or "текущ" in reply.lower()
+
+    def test_model_set_accepts_allowed_model(self):
+        plugin, runtime = _make_plugin()
+        runtime.set_user_model.return_value = True
+        msg = _make_message(text="!model set gpt-4o")
+
+        plugin.handle_dm(msg)
+
+        runtime.set_user_model.assert_called_once_with("user1", "gpt-4o")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "gpt-4o" in reply
+        assert "✅" in reply
+
+    def test_model_set_rejects_unknown_model(self):
+        plugin, runtime = _make_plugin()
+        runtime.set_user_model.return_value = False
+        msg = _make_message(text="!model set bad-model")
+
+        plugin.handle_dm(msg)
+
+        runtime.set_user_model.assert_called_once_with("user1", "bad-model")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "bad-model" in reply
+        assert "gpt-4o-mini" in reply
+
+    def test_model_reset_calls_runtime(self):
+        plugin, runtime = _make_plugin()
+        runtime.reset_user_model.return_value = True
+        msg = _make_message(text="!model reset")
+
+        plugin.handle_dm(msg)
+
+        runtime.reset_user_model.assert_called_once_with("user1")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "✅" in reply
+
+    def test_help_includes_model(self):
+        plugin, _ = _make_plugin()
+        msg = _make_message(text="!help")
+
+        plugin.handle_dm(msg)
+
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "!model" in reply
 
 
 class TestApprovalRequests:

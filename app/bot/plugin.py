@@ -35,6 +35,7 @@ class ZeroClawPlugin(Plugin):
             get_driver=lambda: self.driver,
             runtime=self._runtime,
             base_url=self._base_url,
+            allowed_models=settings.allowed_models,
             sessions=self._sessions,
         )
         self._dialogs = DialogHandler(
