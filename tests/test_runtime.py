@@ -349,6 +349,18 @@ class TestEnsureRuntime:
 
         apps.patch_namespaced_deployment.assert_not_called()
 
+    def test_restart_propagates_non_404_deployment_patch_error(self):
+        rm, core, apps = _make_runtime()
+        env_secret = MagicMock()
+        env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
+        core.read_namespaced_secret.return_value = env_secret
+        apps.patch_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(
+            status=500
+        )
+
+        with pytest.raises(k8s_client.exceptions.ApiException):
+            rm._lifecycle.restart_if_running("user1")
+
 
 class TestListIdle:
     def _make_deploy(self, name, last_activity_iso, replicas=1):

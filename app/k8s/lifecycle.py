@@ -174,6 +174,7 @@ class LifecycleManager:
                 exc_info=True,
                 extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
             )
+            raise
 
     def _ensure_configmap(self) -> None:
         if self._configmap_ensured:
