@@ -207,7 +207,7 @@ class TestHandleMessage:
         msg = _make_message()
         frames = _frames({"type": "done", "full_response": "resp"})
 
-        def ensure_runtime(_user_id):
+        def ensure_runtime(_user_id, *, user_id=None):
             assert plugin.driver.create_post.called
             return "zc-abc.ns.svc.cluster.local"
 
@@ -498,7 +498,7 @@ class TestChannelHandling:
         frames = iter([{"type": "done", "full_response": "ok"}])
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_channel_mention(msg)
-        runtime.ensure_runtime.assert_called_once_with("channel-abc")
+        runtime.ensure_runtime.assert_called_once_with("channel-abc", user_id="user1")
 
     def test_channel_scope_omits_user_id(self):
         plugin, _ = _make_plugin()
@@ -553,4 +553,4 @@ class TestChannelHandling:
         frames = iter([{"type": "done", "full_response": "ok"}])
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_dm(msg)
-        runtime.ensure_runtime.assert_called_once_with("user1")
+        runtime.ensure_runtime.assert_called_once_with("user1", user_id="user1")

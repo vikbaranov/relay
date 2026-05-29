@@ -24,34 +24,6 @@ PART_OF_VALUE = "zeroclaw-runtime"
 _WORKSPACE_DEFAULTS = pathlib.Path(__file__).parent.parent / "workspace"
 WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md")
 
-_ALLOWED_COMMANDS = [
-    "git",
-    "ls",
-    "cat",
-    "grep",
-    "find",
-    "echo",
-    "pwd",
-    "wc",
-    "head",
-    "tail",
-    "date",
-    "df",
-    "du",
-    "uname",
-    "uptime",
-    "hostname",
-    "gh",
-    "rm",
-    "mv",
-    "cp",
-    "mkdir",
-    "touch",
-    "bash",
-    "curl",
-    "zeroclaw",
-]
-
 
 def _workspace_default(filename: str) -> str | None:
     path = _WORKSPACE_DEFAULTS / filename
@@ -90,7 +62,7 @@ class LifecycleManager:
     def _now_iso() -> str:
         return datetime.now(UTC).isoformat()
 
-    def ensure_all(self, mm_user_id: str) -> str:
+    def ensure_all(self, mm_user_id: str, *, model_user_id: str | None = None) -> str:
         """Create or wake up per-user K8s resources. Returns internal service DNS."""
         s = self._settings
         name = object_name(self._secret, mm_user_id)
@@ -106,7 +78,9 @@ class LifecycleManager:
         self._ensure_provider_credentials_secret()
         self._ensure_identity_configmap(mm_user_id, labels, annotations)
         env_keys = self._get_user_env_keys(mm_user_id)
-        self._ensure_user_zeroclaw_config(mm_user_id, env_keys, labels, annotations)
+        self._ensure_user_zeroclaw_config(
+            mm_user_id, env_keys, labels, annotations, model_user_id=model_user_id
+        )
         self._ensure_pvc(pvc, labels, annotations)
         self._ensure_service(name, labels, annotations)
         self._ensure_deployment(name, pvc, mm_user_id, labels, annotations)
@@ -128,10 +102,10 @@ class LifecycleManager:
                 extra={"runtime_key": name, "namespace": self._ns},
             )
 
-    def restart_if_running(self, mm_user_id: str) -> None:
+    def restart_if_running(self, mm_user_id: str, *, model_user_id: str | None = None) -> None:
         name = object_name(self._secret, mm_user_id)
         env_keys = self._get_user_env_keys(mm_user_id)
-        model = self._get_user_model(mm_user_id)
+        model = self._get_user_model(model_user_id or mm_user_id)
         s = self._settings
         cname = zeroclaw_config_secret_name(self._secret, mm_user_id)
         config_toml = self._zeroclaw_config_toml(env_keys, model)
@@ -199,7 +173,7 @@ class LifecycleManager:
     def _zeroclaw_config_toml(self, env_keys: list[str], model: str | None = None) -> str:
         s = self._settings
         effective_model = model or s.default_model
-        allowed_commands = json.dumps(_ALLOWED_COMMANDS, indent=4)
+        allowed_commands = json.dumps(s.allowed_commands, indent=4)
         sections = [
             "[gateway]",
             "allow_public_bind = true",
@@ -284,11 +258,17 @@ class LifecycleManager:
         return s.default_model
 
     def _ensure_user_zeroclaw_config(
-        self, mm_user_id: str, env_keys: list[str], labels: dict, annotations: dict
+        self,
+        mm_user_id: str,
+        env_keys: list[str],
+        labels: dict,
+        annotations: dict,
+        *,
+        model_user_id: str | None = None,
     ) -> None:
         s = self._settings
         name = zeroclaw_config_secret_name(self._secret, mm_user_id)
-        model = self._get_user_model(mm_user_id)
+        model = self._get_user_model(model_user_id or mm_user_id)
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(
                 name=name,

@@ -54,6 +54,20 @@ class TestSettingsModels:
         assert settings.allowed_models == ["gpt-4o-mini", "gpt-4o"]
         assert settings.default_model == "gpt-4o-mini"
 
+    def test_allowed_commands_are_parsed_from_environment(self, monkeypatch):
+        monkeypatch.setenv("MATTERMOST_URL", "http://mm")
+        monkeypatch.setenv("MATTERMOST_TEAM", "t")
+        monkeypatch.setenv("MATTERMOST_BOT_TOKEN", "tok")
+        monkeypatch.setenv("MATTERMOST_BOT_USERNAME", "bot")
+        monkeypatch.setenv("K8S_NAME_SECRET", "test-secret")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("ALLOWED_MODELS", "gpt-4o-mini,gpt-4o")
+        monkeypatch.setenv("ALLOWED_COMMANDS", "git, ls ,curl")
+
+        settings = Settings()
+
+        assert settings.allowed_commands == ["git", "ls", "curl"]
+
     def test_allowed_models_rejects_empty_string(self):
         with pytest.raises(ValidationError):
             _settings(allowed_models="")
