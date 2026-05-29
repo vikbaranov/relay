@@ -131,13 +131,15 @@ class LifecycleManager:
     def restart_if_running(self, mm_user_id: str) -> None:
         name = object_name(self._secret, mm_user_id)
         env_keys = self._get_user_env_keys(mm_user_id)
+        model = self._get_user_model(mm_user_id)
         s = self._settings
         cname = zeroclaw_config_secret_name(self._secret, mm_user_id)
+        config_toml = self._zeroclaw_config_toml(env_keys, model)
         try:
             self._core.patch_namespaced_secret(
                 cname,
                 self._ns,
-                {"stringData": {s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys)}},
+                {"stringData": {s.zeroclaw_config_key: config_toml}},
             )
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
@@ -191,8 +193,9 @@ class LifecycleManager:
             logger.info("created ConfigMap %s", s.zeroclaw_configmap)
         self._configmap_ensured = True
 
-    def _zeroclaw_config_toml(self, env_keys: list[str]) -> str:
+    def _zeroclaw_config_toml(self, env_keys: list[str], model: str | None = None) -> str:
         s = self._settings
+        effective_model = model or s.default_model
         allowed_commands = json.dumps(_ALLOWED_COMMANDS, indent=4)
         sections = [
             "[gateway]",
@@ -221,7 +224,7 @@ class LifecycleManager:
             f'fallback = "{s.openai_base_url}"',
             "",
             f'[providers.models."{s.openai_base_url}"]',
-            f'model = "{s.default_model}"',
+            f'model = "{effective_model}"',
             f'api_key = "{s.openai_api_key}"',
             "",
         ]
@@ -263,11 +266,26 @@ class LifecycleManager:
                 return []
             raise
 
+    def _get_user_model(self, mm_user_id: str) -> str:
+        s = self._settings
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return s.default_model
+            raise
+        model = (cm.data or {}).get("MODEL")
+        if model in s.allowed_models:
+            return model
+        return s.default_model
+
     def _ensure_user_zeroclaw_config(
         self, mm_user_id: str, env_keys: list[str], labels: dict, annotations: dict
     ) -> None:
         s = self._settings
         name = zeroclaw_config_secret_name(self._secret, mm_user_id)
+        model = self._get_user_model(mm_user_id)
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(
                 name=name,
@@ -275,7 +293,7 @@ class LifecycleManager:
                 labels=labels,
                 annotations=annotations,
             ),
-            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys)},
+            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys, model)},
         )
         try:
             self._core.read_namespaced_secret(name, self._ns)

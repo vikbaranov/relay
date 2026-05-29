@@ -227,6 +227,57 @@ class TestEnsureRuntime:
         assert 'model = "gpt-4o-mini"' in config_toml
         assert 'api_key = "sk-secret-fixture"' in config_toml
 
+    def test_user_config_uses_default_allowed_model(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="default-model,other-model"))
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'model = "default-model"' in config_toml
+
+    def test_user_config_uses_allowed_model_override(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="default-model,custom-model"))
+        identity_cm = MagicMock()
+        identity_cm.data = {"MODEL": "custom-model"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'model = "custom-model"' in config_toml
+
+    def test_user_config_ignores_stale_model_override(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="default-model,custom-model"))
+        identity_cm = MagicMock()
+        identity_cm.data = {"MODEL": "removed-model"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'model = "default-model"' in config_toml
+
     def test_deployment_mounts_per_user_config_secret(self):
         rm, core, apps = _make_runtime(_settings(openai_api_key="sk-secret-fixture"))
         core.read_namespaced_persistent_volume_claim.side_effect = (
@@ -268,7 +319,10 @@ class TestEnsureRuntime:
         assert "MY_KEY" in config_toml
 
     def test_restart_updates_user_config_before_pod_restart(self):
-        rm, core, apps = _make_runtime()
+        rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        identity_cm = MagicMock()
+        identity_cm.data = {"MODEL": "gpt-4o"}
+        core.read_namespaced_config_map.return_value = identity_cm
         env_secret = MagicMock()
         env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
         core.read_namespaced_secret.return_value = env_secret
@@ -280,6 +334,7 @@ class TestEnsureRuntime:
         assert patch_call[0][0] == cname
         config_toml = patch_call[0][2]["stringData"]["config.toml"]
         assert "GITHUB_TOKEN" in config_toml
+        assert 'model = "gpt-4o"' in config_toml
         apps.patch_namespaced_deployment.assert_called_once()
 
 
