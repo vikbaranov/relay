@@ -3,7 +3,9 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+import pytest
 from kubernetes import client as k8s_client
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.identity import identity_configmap_name, object_name, zeroclaw_config_secret_name
@@ -18,6 +20,7 @@ def _settings(**overrides) -> Settings:
         mattermost_bot_username="bot",
         k8s_name_secret="test-secret",
         k8s_mode="kubeconfig",
+        allowed_models="gpt-4o-mini,gpt-4o",
     )
     base.update(overrides)
     return Settings(**base)
@@ -28,6 +31,22 @@ def _make_runtime(settings=None):
     core = MagicMock()
     apps = MagicMock()
     return RuntimeManager(settings=s, core=core, apps=apps), core, apps
+
+
+class TestSettingsModels:
+    def test_allowed_models_are_parsed_from_comma_separated_string(self):
+        settings = _settings(allowed_models="gpt-4o-mini, gpt-4o ,gpt-4.1")
+
+        assert settings.allowed_models == ["gpt-4o-mini", "gpt-4o", "gpt-4.1"]
+        assert settings.default_model == "gpt-4o-mini"
+
+    def test_allowed_models_rejects_empty_string(self):
+        with pytest.raises(ValidationError):
+            _settings(allowed_models="")
+
+    def test_allowed_models_rejects_only_commas_and_spaces(self):
+        with pytest.raises(ValidationError):
+            _settings(allowed_models=" , , ")
 
 
 class TestEnsureRuntime:
