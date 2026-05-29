@@ -143,12 +143,14 @@ class LifecycleManager:
             )
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_RESTART).inc()
                 logger.warning(
                     "failed to update user zeroclaw config %s",
                     cname,
                     exc_info=True,
                     extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
                 )
+                raise
         now = self._now_iso()
         try:
             self._apps.patch_namespaced_deployment(

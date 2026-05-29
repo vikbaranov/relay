@@ -337,6 +337,18 @@ class TestEnsureRuntime:
         assert 'model = "gpt-4o"' in config_toml
         apps.patch_namespaced_deployment.assert_called_once()
 
+    def test_restart_propagates_non_404_config_patch_error_without_pod_restart(self):
+        rm, core, apps = _make_runtime()
+        env_secret = MagicMock()
+        env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
+        core.read_namespaced_secret.return_value = env_secret
+        core.patch_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=500)
+
+        with pytest.raises(k8s_client.exceptions.ApiException):
+            rm._lifecycle.restart_if_running("user1")
+
+        apps.patch_namespaced_deployment.assert_not_called()
+
 
 class TestListIdle:
     def _make_deploy(self, name, last_activity_iso, replicas=1):
