@@ -395,6 +395,57 @@ class TestWorkspaceFiles:
         core.read_namespaced_config_map.return_value = cm
         assert rm.get_workspace_file("user1", "SOUL.md") is None
 
+    def test_get_user_model_returns_override_when_allowed(self):
+        rm, core, _ = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {"MODEL": "gpt-4o"}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.get_user_model("user1") == "gpt-4o"
+
+    def test_get_user_model_returns_default_when_absent(self):
+        rm, core, _ = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.get_user_model("user1") == "gpt-4o-mini"
+
+    def test_get_user_model_returns_default_when_stale(self):
+        rm, core, _ = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {"MODEL": "removed-model"}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.get_user_model("user1") == "gpt-4o-mini"
+
+    def test_set_user_model_rejects_unknown_model(self):
+        rm, _, _ = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+
+        assert rm.set_user_model("user1", "bad-model") is False
+
+    def test_set_user_model_patches_configmap_and_restarts(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+
+        assert rm.set_user_model("user1", "gpt-4o") is True
+
+        core.patch_namespaced_config_map.assert_called_once()
+        _, _, body = core.patch_namespaced_config_map.call_args[0]
+        assert body["data"]["MODEL"] == "gpt-4o"
+        apps.patch_namespaced_deployment.assert_called_once()
+
+    def test_reset_user_model_patches_to_default_and_restarts(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {"MODEL": "gpt-4o"}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.reset_user_model("user1") is True
+
+        _, _, body = core.patch_namespaced_config_map.call_args[0]
+        assert body["data"]["MODEL"] == "gpt-4o-mini"
+        apps.patch_namespaced_deployment.assert_called_once()
+
     def test_ensure_identity_configmap_creates_on_first_call(self):
         rm, core, _ = _make_runtime()
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)

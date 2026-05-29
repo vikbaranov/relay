@@ -48,6 +48,7 @@ class RuntimeManager:
             secret=self._secret,
             ns=self._ns,
             restart_fn=self._lifecycle.restart_if_running,
+            allowed_models=settings.allowed_models,
         )
 
     @staticmethod
@@ -168,6 +169,15 @@ class RuntimeManager:
 
     def reset_workspace_file(self, mm_user_id: str, filename: str) -> bool:
         return self._user_state.reset_workspace_file(mm_user_id, filename)
+
+    def get_user_model(self, mm_user_id: str) -> str:
+        return self._user_state.get_user_model(mm_user_id)
+
+    def set_user_model(self, mm_user_id: str, model: str) -> bool:
+        return self._user_state.set_user_model(mm_user_id, model)
+
+    def reset_user_model(self, mm_user_id: str) -> bool:
+        return self._user_state.reset_user_model(mm_user_id)
 
     # ── private method exposed for tests ─────────────────────────────────────
 
