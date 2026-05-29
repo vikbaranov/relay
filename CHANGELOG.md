@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/vikbaranov/relay/compare/v0.6.0...v0.7.0) (2026-05-29)
+
+
+### Features
+
+* model management ([#16](https://github.com/vikbaranov/relay/issues/16)) ([f0ef965](https://github.com/vikbaranov/relay/commit/f0ef965664f6183fd5af726d4b16d91a20edc6eb))
+
 ## [0.6.0](https://github.com/vikbaranov/relay/compare/v0.5.0...v0.6.0) (2026-05-28)
 
 
