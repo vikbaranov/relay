@@ -221,7 +221,7 @@ class LifecycleManager:
             f'fallback = "{s.openai_base_url}"',
             "",
             f'[providers.models."{s.openai_base_url}"]',
-            f'model = "{s.openai_model}"',
+            f'model = "{s.default_model}"',
             f'api_key = "{s.openai_api_key}"',
             "",
         ]
