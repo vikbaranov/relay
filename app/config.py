@@ -1,8 +1,9 @@
 import logging
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str
     openai_base_url: str = "https://api.openai.com/v1"
-    allowed_models: list[str]
+    allowed_models: Annotated[list[str], NoDecode]
 
     user_pvc_size: str = "5Gi"
     user_pvc_storage_class: str | None = None

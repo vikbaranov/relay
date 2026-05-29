@@ -40,6 +40,20 @@ class TestSettingsModels:
         assert settings.allowed_models == ["gpt-4o-mini", "gpt-4o", "gpt-4.1"]
         assert settings.default_model == "gpt-4o-mini"
 
+    def test_allowed_models_are_parsed_from_environment(self, monkeypatch):
+        monkeypatch.setenv("MATTERMOST_URL", "http://mm")
+        monkeypatch.setenv("MATTERMOST_TEAM", "t")
+        monkeypatch.setenv("MATTERMOST_BOT_TOKEN", "tok")
+        monkeypatch.setenv("MATTERMOST_BOT_USERNAME", "bot")
+        monkeypatch.setenv("K8S_NAME_SECRET", "test-secret")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("ALLOWED_MODELS", "gpt-4o-mini,gpt-4o")
+
+        settings = Settings()
+
+        assert settings.allowed_models == ["gpt-4o-mini", "gpt-4o"]
+        assert settings.default_model == "gpt-4o-mini"
+
     def test_allowed_models_rejects_empty_string(self):
         with pytest.raises(ValidationError):
             _settings(allowed_models="")
@@ -210,6 +224,7 @@ class TestEnsureRuntime:
         config_toml = user_config.string_data["config.toml"]
         assert 'fallback = "custom:https://example.test/v1"' in config_toml
         assert '[providers.models."custom:https://example.test/v1"]' in config_toml
+        assert 'model = "gpt-4o-mini"' in config_toml
         assert 'api_key = "sk-secret-fixture"' in config_toml
 
     def test_deployment_mounts_per_user_config_secret(self):
