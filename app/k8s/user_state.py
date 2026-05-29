@@ -72,11 +72,9 @@ class UserStateManager:
         try:
             cm = self._core.read_namespaced_config_map(name, self._ns)
             data = cm.data or {}
-            if data.get(MODEL_KEY) == self.default_model:
+            if MODEL_KEY not in data:
                 return False
-            self._core.patch_namespaced_config_map(
-                name, self._ns, {"data": {MODEL_KEY: self.default_model}}
-            )
+            self._core.patch_namespaced_config_map(name, self._ns, {"data": {MODEL_KEY: None}})
             self._restart(mm_user_id)
             return True
         except client.exceptions.ApiException as exc:

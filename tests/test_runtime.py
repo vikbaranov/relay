@@ -434,7 +434,18 @@ class TestWorkspaceFiles:
         assert body["data"]["MODEL"] == "gpt-4o"
         apps.patch_namespaced_deployment.assert_called_once()
 
-    def test_reset_user_model_patches_to_default_and_restarts(self):
+    def test_reset_user_model_returns_false_when_absent(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.reset_user_model("user1") is False
+
+        core.patch_namespaced_config_map.assert_not_called()
+        apps.patch_namespaced_deployment.assert_not_called()
+
+    def test_reset_user_model_removes_override_and_restarts(self):
         rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
         cm = MagicMock()
         cm.data = {"MODEL": "gpt-4o"}
@@ -443,7 +454,7 @@ class TestWorkspaceFiles:
         assert rm.reset_user_model("user1") is True
 
         _, _, body = core.patch_namespaced_config_map.call_args[0]
-        assert body["data"]["MODEL"] == "gpt-4o-mini"
+        assert body["data"]["MODEL"] is None
         apps.patch_namespaced_deployment.assert_called_once()
 
     def test_ensure_identity_configmap_creates_on_first_call(self):
