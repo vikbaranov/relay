@@ -9,6 +9,8 @@ from app.k8s.lifecycle import _workspace_default, _workspace_default_data
 
 logger = logging.getLogger(__name__)
 
+MODEL_KEY = "MODEL"
+
 
 class UserStateManager:
     def __init__(
@@ -18,12 +20,68 @@ class UserStateManager:
         secret: bytes,
         ns: str,
         restart_fn: Callable[[str], None],
+        allowed_models: list[str],
     ) -> None:
         self._core = core
         self._apps = apps
         self._secret = secret
         self._ns = ns
         self._restart = restart_fn
+        self._allowed_models = allowed_models
+
+    @property
+    def default_model(self) -> str:
+        return self._allowed_models[0]
+
+    def get_user_model(self, mm_user_id: str) -> str:
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+            model = (cm.data or {}).get(MODEL_KEY)
+            if model in self._allowed_models:
+                return model
+            return self.default_model
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return self.default_model
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_WORKSPACE_FILE_GET).inc()
+            raise
+
+    def set_user_model(self, mm_user_id: str, model: str) -> bool:
+        if model not in self._allowed_models:
+            return False
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            self._core.patch_namespaced_config_map(name, self._ns, {"data": {MODEL_KEY: model}})
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_WORKSPACE_FILE_SET).inc()
+                raise
+            self._core.create_namespaced_config_map(
+                self._ns,
+                client.V1ConfigMap(
+                    metadata=client.V1ObjectMeta(name=name, namespace=self._ns),
+                    data={**_workspace_default_data(), MODEL_KEY: model},
+                ),
+            )
+        self._restart(mm_user_id)
+        return True
+
+    def reset_user_model(self, mm_user_id: str) -> bool:
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+            data = cm.data or {}
+            if MODEL_KEY not in data:
+                return False
+            self._core.patch_namespaced_config_map(name, self._ns, {"data": {MODEL_KEY: None}})
+            self._restart(mm_user_id)
+            return True
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return False
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_WORKSPACE_FILE_RESET).inc()
+            raise
 
     def set_user_env(self, mm_user_id: str, key: str, value: str) -> None:
         sname = env_secret_name(self._secret, mm_user_id)

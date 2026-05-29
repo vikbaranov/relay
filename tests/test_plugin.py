@@ -15,6 +15,7 @@ def _settings() -> Settings:
         mattermost_bot_token="tok",
         mattermost_bot_username="bot",
         mattermost_thread_replies=True,
+        allowed_models="gpt-4o-mini,gpt-4o",
         k8s_name_secret="test-secret",
         k8s_mode="kubeconfig",
     )
@@ -206,7 +207,7 @@ class TestHandleMessage:
         msg = _make_message()
         frames = _frames({"type": "done", "full_response": "resp"})
 
-        def ensure_runtime(_user_id):
+        def ensure_runtime(_user_id, *, user_id=None):
             assert plugin.driver.create_post.called
             return "zc-abc.ns.svc.cluster.local"
 
@@ -370,6 +371,76 @@ class TestSoulIdentityCommands:
         assert "!identity" in reply
 
 
+class TestModelCommands:
+    def test_model_show_returns_current_model(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_user_model.return_value = "gpt-4o"
+        msg = _make_message(text="!model show")
+
+        plugin.handle_dm(msg)
+
+        runtime.ensure_runtime.assert_not_called()
+        runtime.get_user_model.assert_called_once_with("user1")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "gpt-4o" in reply
+
+    def test_model_list_marks_current_model(self):
+        plugin, runtime = _make_plugin()
+        runtime.get_user_model.return_value = "gpt-4o"
+        msg = _make_message(text="!model list")
+
+        plugin.handle_dm(msg)
+
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "gpt-4o-mini" in reply
+        assert "gpt-4o" in reply
+        assert "current" in reply.lower() or "текущ" in reply.lower()
+
+    def test_model_set_accepts_allowed_model(self):
+        plugin, runtime = _make_plugin()
+        runtime.set_user_model.return_value = True
+        msg = _make_message(text="!model set gpt-4o")
+
+        plugin.handle_dm(msg)
+
+        runtime.set_user_model.assert_called_once_with("user1", "gpt-4o")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "gpt-4o" in reply
+        assert "✅" in reply
+
+    def test_model_set_rejects_unknown_model(self):
+        plugin, runtime = _make_plugin()
+        runtime.set_user_model.return_value = False
+        msg = _make_message(text="!model set bad-model")
+
+        plugin.handle_dm(msg)
+
+        runtime.set_user_model.assert_called_once_with("user1", "bad-model")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "bad-model" in reply
+        assert "gpt-4o-mini" in reply
+
+    def test_model_reset_calls_runtime(self):
+        plugin, runtime = _make_plugin()
+        runtime.reset_user_model.return_value = True
+        msg = _make_message(text="!model reset")
+
+        plugin.handle_dm(msg)
+
+        runtime.reset_user_model.assert_called_once_with("user1")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "✅" in reply
+
+    def test_help_includes_model(self):
+        plugin, _ = _make_plugin()
+        msg = _make_message(text="!help")
+
+        plugin.handle_dm(msg)
+
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "!model" in reply
+
+
 class TestApprovalRequests:
     def test_returns_always_decision(self):
         plugin, _ = _make_plugin()
@@ -427,7 +498,7 @@ class TestChannelHandling:
         frames = iter([{"type": "done", "full_response": "ok"}])
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_channel_mention(msg)
-        runtime.ensure_runtime.assert_called_once_with("channel-abc")
+        runtime.ensure_runtime.assert_called_once_with("channel-abc", user_id="user1")
 
     def test_channel_scope_omits_user_id(self):
         plugin, _ = _make_plugin()
@@ -482,4 +553,4 @@ class TestChannelHandling:
         frames = iter([{"type": "done", "full_response": "ok"}])
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_dm(msg)
-        runtime.ensure_runtime.assert_called_once_with("user1")
+        runtime.ensure_runtime.assert_called_once_with("user1", user_id="user1")

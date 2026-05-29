@@ -48,14 +48,18 @@ class RuntimeManager:
             secret=self._secret,
             ns=self._ns,
             restart_fn=self._lifecycle.restart_if_running,
+            allowed_models=settings.allowed_models,
         )
 
     @staticmethod
     def _now_iso() -> str:
         return datetime.now(UTC).isoformat()
 
-    def ensure_runtime(self, mm_user_id: str) -> str:
-        return self._lifecycle.ensure_all(mm_user_id)
+    def ensure_runtime(self, mm_user_id: str, *, user_id: str | None = None) -> str:
+        return self._lifecycle.ensure_all(mm_user_id, model_user_id=user_id)
+
+    def restart_runtime(self, runtime_key: str, mm_user_id: str) -> None:
+        self._lifecycle.restart_if_running(runtime_key, model_user_id=mm_user_id)
 
     def is_ready(self, service_dns: str) -> bool:
         url = f"http://{service_dns}:{self._settings.zeroclaw_port}/health"
@@ -168,6 +172,15 @@ class RuntimeManager:
 
     def reset_workspace_file(self, mm_user_id: str, filename: str) -> bool:
         return self._user_state.reset_workspace_file(mm_user_id, filename)
+
+    def get_user_model(self, mm_user_id: str) -> str:
+        return self._user_state.get_user_model(mm_user_id)
+
+    def set_user_model(self, mm_user_id: str, model: str) -> bool:
+        return self._user_state.set_user_model(mm_user_id, model)
+
+    def reset_user_model(self, mm_user_id: str) -> bool:
+        return self._user_state.reset_user_model(mm_user_id)
 
     # ── private method exposed for tests ─────────────────────────────────────
 

@@ -18,18 +18,20 @@ class CommandHandler:
         get_driver: Callable,
         runtime,
         base_url: str,
+        allowed_models: list[str],
         sessions: dict,
     ) -> None:
         self._get_driver = get_driver
         self._runtime = runtime
         self._base_url = base_url
+        self._allowed_models = allowed_models
         self._sessions = sessions
 
     @property
     def _driver(self):
         return self._get_driver()
 
-    def handle(self, message, scope: str, root_id: str) -> bool:
+    def handle(self, message, scope: str, root_id: str, runtime_key: str | None = None) -> bool:
         command = message.text.strip().split(maxsplit=1)[0].lower()
 
         if command in ("!new", "!clear"):
@@ -47,18 +49,31 @@ class CommandHandler:
                 channel_id=message.channel_id,
                 message=(
                     "**Доступные команды:**\n"
+                    "\n"
+                    "**Контекст**\n"
                     "- `!new` — начать новый контекст разговора\n"
                     "- `!clear` — очистить контекст (аналог `!new`)\n"
                     "- `!stop` — остановить текущее выполнение\n"
+                    "\n"
+                    "**Переменные**\n"
                     "- `!env set KEY` — сохранить переменную окружения\n"
                     "- `!env list` — список переменных окружения\n"
                     "- `!env del KEY` — удалить переменную окружения\n"
+                    "\n"
+                    "**Модель**\n"
+                    "- `!model list` — список доступных моделей\n"
+                    "- `!model show` — показать текущую модель\n"
+                    "- `!model set MODEL` — выбрать модель\n"
+                    "- `!model reset` — сбросить модель к умолчанию\n"
+                    "\n"
+                    "**Soul / Identity**\n"
                     "- `!soul show` — показать текущий SOUL.md\n"
                     "- `!soul set` — изменить SOUL.md\n"
                     "- `!soul reset` — сбросить SOUL.md к умолчанию\n"
                     "- `!identity show` — показать текущий IDENTITY.md\n"
                     "- `!identity set` — изменить IDENTITY.md\n"
                     "- `!identity reset` — сбросить IDENTITY.md к умолчанию\n"
+                    "\n"
                     "- `!help` — показать эту справку"
                 ),
                 root_id=root_id,
@@ -83,20 +98,38 @@ class CommandHandler:
             return True
 
         if command == "!env":
-            self._handle_env(message, root_id)
+            self._handle_env(message, root_id, runtime_key)
+            return True
+
+        if command == "!model":
+            self._handle_model(message, root_id, runtime_key)
             return True
 
         if command == "!soul":
-            self._handle_workspace_file(message, root_id, "SOUL.md")
+            self._handle_workspace_file(message, root_id, "SOUL.md", runtime_key)
             return True
 
         if command == "!identity":
-            self._handle_workspace_file(message, root_id, "IDENTITY.md")
+            self._handle_workspace_file(message, root_id, "IDENTITY.md", runtime_key)
             return True
 
         return False
 
-    def _handle_env(self, message, root_id: str) -> None:
+    def _restart_channel_runtime(
+        self, runtime_key: str | None, user_id: str, *, did_change: bool
+    ) -> None:
+        if not (did_change and runtime_key and runtime_key != user_id):
+            return
+        try:
+            self._runtime.restart_runtime(runtime_key, user_id)
+        except Exception:
+            logger.exception(
+                "channel_runtime_restart_failed runtime_key=%s",
+                runtime_key,
+                extra={"mm_user_id": user_id},
+            )
+
+    def _handle_env(self, message, root_id: str, runtime_key: str | None = None) -> None:
         parts = message.text.strip().split(maxsplit=2)
         sub = parts[1].lower() if len(parts) > 1 else ""
 
@@ -157,6 +190,7 @@ class CommandHandler:
             key = parts[2]
             try:
                 found = self._runtime.delete_user_env(message.user_id, key)
+                self._restart_channel_runtime(runtime_key, message.user_id, did_change=found)
                 reply = (
                     f"✅ `{key}` удалён. Сессия будет перезапущена."
                     if found
@@ -181,7 +215,83 @@ class CommandHandler:
             root_id=root_id,
         )
 
-    def _handle_workspace_file(self, message, root_id: str, filename: str) -> None:
+    def _handle_model(self, message, root_id: str, runtime_key: str | None = None) -> None:
+        parts = message.text.strip().split(maxsplit=2)
+        sub = parts[1].lower() if len(parts) > 1 else "show"
+        allowed = self._allowed_models
+
+        if sub == "show":
+            try:
+                model = self._runtime.get_user_model(message.user_id)
+                reply = f"Текущая модель: `{model}`"
+            except Exception:
+                logger.exception("model_show_failed", extra={"mm_user_id": message.user_id})
+                reply = "Ошибка при получении текущей модели."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "list":
+            try:
+                current = self._runtime.get_user_model(message.user_id)
+                lines = [
+                    f"- `{model}`" + (" — текущая" if model == current else "") for model in allowed
+                ]
+                reply = "Доступные модели:\n" + "\n".join(lines)
+            except Exception:
+                logger.exception("model_list_failed", extra={"mm_user_id": message.user_id})
+                reply = "Ошибка при получении списка моделей."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "set" and len(parts) == 3:
+            model = parts[2]
+            try:
+                saved = self._runtime.set_user_model(message.user_id, model)
+                self._restart_channel_runtime(runtime_key, message.user_id, did_change=saved)
+                if saved:
+                    reply = f"✅ Модель `{model}` сохранена. Сессия будет перезапущена."
+                else:
+                    reply = f"Модель `{model}` недоступна. Доступные модели: " + ", ".join(
+                        f"`{m}`" for m in allowed
+                    )
+            except Exception:
+                logger.exception(
+                    "model_set_failed model=%s", model, extra={"mm_user_id": message.user_id}
+                )
+                reply = "Ошибка при сохранении модели."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "reset":
+            try:
+                changed = self._runtime.reset_user_model(message.user_id)
+                self._restart_channel_runtime(runtime_key, message.user_id, did_change=changed)
+                reply = (
+                    f"✅ Модель сброшена к `{allowed[0]}`. Сессия будет перезапущена."
+                    if changed
+                    else f"Модель уже использует значение по умолчанию: `{allowed[0]}`."
+                )
+            except Exception:
+                logger.exception("model_reset_failed", extra={"mm_user_id": message.user_id})
+                reply = "Ошибка при сбросе модели."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        self._driver.create_post(
+            channel_id=message.channel_id,
+            message=(
+                "Использование:\n"
+                "- `!model list` — список доступных моделей\n"
+                "- `!model show` — показать текущую модель\n"
+                "- `!model set MODEL` — выбрать модель\n"
+                "- `!model reset` — сбросить модель к умолчанию"
+            ),
+            root_id=root_id,
+        )
+
+    def _handle_workspace_file(
+        self, message, root_id: str, filename: str, runtime_key: str | None = None
+    ) -> None:
         parts = message.text.strip().split(maxsplit=1)
         sub = parts[1].lower() if len(parts) > 1 else "show"
         cmd = filename.replace(".md", "").lower()
@@ -235,6 +345,7 @@ class CommandHandler:
         if sub == "reset":
             try:
                 found = self._runtime.reset_workspace_file(message.user_id, filename)
+                self._restart_channel_runtime(runtime_key, message.user_id, did_change=found)
                 reply = (
                     f"✅ `{filename}` был сброшен. Сессия будет перезапущена."
                     if found

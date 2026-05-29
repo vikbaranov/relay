@@ -24,34 +24,6 @@ PART_OF_VALUE = "zeroclaw-runtime"
 _WORKSPACE_DEFAULTS = pathlib.Path(__file__).parent.parent / "workspace"
 WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md")
 
-_ALLOWED_COMMANDS = [
-    "git",
-    "ls",
-    "cat",
-    "grep",
-    "find",
-    "echo",
-    "pwd",
-    "wc",
-    "head",
-    "tail",
-    "date",
-    "df",
-    "du",
-    "uname",
-    "uptime",
-    "hostname",
-    "gh",
-    "rm",
-    "mv",
-    "cp",
-    "mkdir",
-    "touch",
-    "bash",
-    "curl",
-    "zeroclaw",
-]
-
 
 def _workspace_default(filename: str) -> str | None:
     path = _WORKSPACE_DEFAULTS / filename
@@ -90,7 +62,7 @@ class LifecycleManager:
     def _now_iso() -> str:
         return datetime.now(UTC).isoformat()
 
-    def ensure_all(self, mm_user_id: str) -> str:
+    def ensure_all(self, mm_user_id: str, *, model_user_id: str | None = None) -> str:
         """Create or wake up per-user K8s resources. Returns internal service DNS."""
         s = self._settings
         name = object_name(self._secret, mm_user_id)
@@ -106,7 +78,9 @@ class LifecycleManager:
         self._ensure_provider_credentials_secret()
         self._ensure_identity_configmap(mm_user_id, labels, annotations)
         env_keys = self._get_user_env_keys(mm_user_id)
-        self._ensure_user_zeroclaw_config(mm_user_id, env_keys, labels, annotations)
+        self._ensure_user_zeroclaw_config(
+            mm_user_id, env_keys, labels, annotations, model_user_id=model_user_id
+        )
         self._ensure_pvc(pvc, labels, annotations)
         self._ensure_service(name, labels, annotations)
         self._ensure_deployment(name, pvc, mm_user_id, labels, annotations)
@@ -128,25 +102,29 @@ class LifecycleManager:
                 extra={"runtime_key": name, "namespace": self._ns},
             )
 
-    def restart_if_running(self, mm_user_id: str) -> None:
+    def restart_if_running(self, mm_user_id: str, *, model_user_id: str | None = None) -> None:
         name = object_name(self._secret, mm_user_id)
         env_keys = self._get_user_env_keys(mm_user_id)
+        model = self._get_user_model(model_user_id or mm_user_id)
         s = self._settings
         cname = zeroclaw_config_secret_name(self._secret, mm_user_id)
+        config_toml = self._zeroclaw_config_toml(env_keys, model)
         try:
             self._core.patch_namespaced_secret(
                 cname,
                 self._ns,
-                {"stringData": {s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys)}},
+                {"stringData": {s.zeroclaw_config_key: config_toml}},
             )
         except client.exceptions.ApiException as exc:
             if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENV_RESTART).inc()
                 logger.warning(
                     "failed to update user zeroclaw config %s",
                     cname,
                     exc_info=True,
                     extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
                 )
+                raise
         now = self._now_iso()
         try:
             self._apps.patch_namespaced_deployment(
@@ -170,6 +148,7 @@ class LifecycleManager:
                 exc_info=True,
                 extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
             )
+            raise
 
     def _ensure_configmap(self) -> None:
         if self._configmap_ensured:
@@ -191,9 +170,10 @@ class LifecycleManager:
             logger.info("created ConfigMap %s", s.zeroclaw_configmap)
         self._configmap_ensured = True
 
-    def _zeroclaw_config_toml(self, env_keys: list[str]) -> str:
+    def _zeroclaw_config_toml(self, env_keys: list[str], model: str | None = None) -> str:
         s = self._settings
-        allowed_commands = json.dumps(_ALLOWED_COMMANDS, indent=4)
+        effective_model = model or s.default_model
+        allowed_commands = json.dumps(s.allowed_commands, indent=4)
         sections = [
             "[gateway]",
             "allow_public_bind = true",
@@ -221,7 +201,7 @@ class LifecycleManager:
             f'fallback = "{s.openai_base_url}"',
             "",
             f'[providers.models."{s.openai_base_url}"]',
-            f'model = "{s.openai_model}"',
+            f'model = "{effective_model}"',
             f'api_key = "{s.openai_api_key}"',
             "",
         ]
@@ -263,11 +243,32 @@ class LifecycleManager:
                 return []
             raise
 
+    def _get_user_model(self, mm_user_id: str) -> str:
+        s = self._settings
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return s.default_model
+            raise
+        model = (cm.data or {}).get("MODEL")
+        if model in s.allowed_models:
+            return model
+        return s.default_model
+
     def _ensure_user_zeroclaw_config(
-        self, mm_user_id: str, env_keys: list[str], labels: dict, annotations: dict
+        self,
+        mm_user_id: str,
+        env_keys: list[str],
+        labels: dict,
+        annotations: dict,
+        *,
+        model_user_id: str | None = None,
     ) -> None:
         s = self._settings
         name = zeroclaw_config_secret_name(self._secret, mm_user_id)
+        model = self._get_user_model(model_user_id or mm_user_id)
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(
                 name=name,
@@ -275,7 +276,7 @@ class LifecycleManager:
                 labels=labels,
                 annotations=annotations,
             ),
-            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys)},
+            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys, model)},
         )
         try:
             self._core.read_namespaced_secret(name, self._ns)

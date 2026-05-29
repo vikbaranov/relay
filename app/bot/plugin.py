@@ -35,6 +35,7 @@ class ZeroClawPlugin(Plugin):
             get_driver=lambda: self.driver,
             runtime=self._runtime,
             base_url=self._base_url,
+            allowed_models=settings.allowed_models,
             sessions=self._sessions,
         )
         self._dialogs = DialogHandler(
@@ -168,7 +169,7 @@ class ZeroClawPlugin(Plugin):
         root_id = (message.root_id or message.id) if is_channel else self._reply_root_id(message)
         scope = self._session_scope(message, is_channel=is_channel)
 
-        if self._commands.handle(message, scope, root_id):
+        if self._commands.handle(message, scope, root_id, runtime_key=runtime_key):
             return
 
         rkey = object_name(self._secret, runtime_key)
@@ -188,7 +189,7 @@ class ZeroClawPlugin(Plugin):
         post_id = post["id"]
 
         t_ensure = time.monotonic()
-        service_dns = self._runtime.ensure_runtime(runtime_key)
+        service_dns = self._runtime.ensure_runtime(runtime_key, user_id=message.user_id)
         metrics.ensure_runtime_seconds.observe(time.monotonic() - t_ensure)
 
         if not self._runtime.is_ready(service_dns):

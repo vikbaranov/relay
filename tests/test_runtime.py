@@ -3,7 +3,9 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+import pytest
 from kubernetes import client as k8s_client
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.identity import identity_configmap_name, object_name, zeroclaw_config_secret_name
@@ -18,6 +20,7 @@ def _settings(**overrides) -> Settings:
         mattermost_bot_username="bot",
         k8s_name_secret="test-secret",
         k8s_mode="kubeconfig",
+        allowed_models="gpt-4o-mini,gpt-4o",
     )
     base.update(overrides)
     return Settings(**base)
@@ -28,6 +31,50 @@ def _make_runtime(settings=None):
     core = MagicMock()
     apps = MagicMock()
     return RuntimeManager(settings=s, core=core, apps=apps), core, apps
+
+
+class TestSettingsModels:
+    def test_allowed_models_are_parsed_from_comma_separated_string(self):
+        settings = _settings(allowed_models="gpt-4o-mini, gpt-4o ,gpt-4.1")
+
+        assert settings.allowed_models == ["gpt-4o-mini", "gpt-4o", "gpt-4.1"]
+        assert settings.default_model == "gpt-4o-mini"
+
+    def test_allowed_models_are_parsed_from_environment(self, monkeypatch):
+        monkeypatch.setenv("MATTERMOST_URL", "http://mm")
+        monkeypatch.setenv("MATTERMOST_TEAM", "t")
+        monkeypatch.setenv("MATTERMOST_BOT_TOKEN", "tok")
+        monkeypatch.setenv("MATTERMOST_BOT_USERNAME", "bot")
+        monkeypatch.setenv("K8S_NAME_SECRET", "test-secret")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("ALLOWED_MODELS", "gpt-4o-mini,gpt-4o")
+
+        settings = Settings()
+
+        assert settings.allowed_models == ["gpt-4o-mini", "gpt-4o"]
+        assert settings.default_model == "gpt-4o-mini"
+
+    def test_allowed_commands_are_parsed_from_environment(self, monkeypatch):
+        monkeypatch.setenv("MATTERMOST_URL", "http://mm")
+        monkeypatch.setenv("MATTERMOST_TEAM", "t")
+        monkeypatch.setenv("MATTERMOST_BOT_TOKEN", "tok")
+        monkeypatch.setenv("MATTERMOST_BOT_USERNAME", "bot")
+        monkeypatch.setenv("K8S_NAME_SECRET", "test-secret")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("ALLOWED_MODELS", "gpt-4o-mini,gpt-4o")
+        monkeypatch.setenv("ALLOWED_COMMANDS", "git, ls ,curl")
+
+        settings = Settings()
+
+        assert settings.allowed_commands == ["git", "ls", "curl"]
+
+    def test_allowed_models_rejects_empty_string(self):
+        with pytest.raises(ValidationError):
+            _settings(allowed_models="")
+
+    def test_allowed_models_rejects_only_commas_and_spaces(self):
+        with pytest.raises(ValidationError):
+            _settings(allowed_models=" , , ")
 
 
 class TestEnsureRuntime:
@@ -191,7 +238,59 @@ class TestEnsureRuntime:
         config_toml = user_config.string_data["config.toml"]
         assert 'fallback = "custom:https://example.test/v1"' in config_toml
         assert '[providers.models."custom:https://example.test/v1"]' in config_toml
+        assert 'model = "gpt-4o-mini"' in config_toml
         assert 'api_key = "sk-secret-fixture"' in config_toml
+
+    def test_user_config_uses_default_allowed_model(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="default-model,other-model"))
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'model = "default-model"' in config_toml
+
+    def test_user_config_uses_allowed_model_override(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="default-model,custom-model"))
+        identity_cm = MagicMock()
+        identity_cm.data = {"MODEL": "custom-model"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'model = "custom-model"' in config_toml
+
+    def test_user_config_ignores_stale_model_override(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="default-model,custom-model"))
+        identity_cm = MagicMock()
+        identity_cm.data = {"MODEL": "removed-model"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        rm.ensure_runtime("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'model = "default-model"' in config_toml
 
     def test_deployment_mounts_per_user_config_secret(self):
         rm, core, apps = _make_runtime(_settings(openai_api_key="sk-secret-fixture"))
@@ -234,7 +333,10 @@ class TestEnsureRuntime:
         assert "MY_KEY" in config_toml
 
     def test_restart_updates_user_config_before_pod_restart(self):
-        rm, core, apps = _make_runtime()
+        rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        identity_cm = MagicMock()
+        identity_cm.data = {"MODEL": "gpt-4o"}
+        core.read_namespaced_config_map.return_value = identity_cm
         env_secret = MagicMock()
         env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
         core.read_namespaced_secret.return_value = env_secret
@@ -246,7 +348,32 @@ class TestEnsureRuntime:
         assert patch_call[0][0] == cname
         config_toml = patch_call[0][2]["stringData"]["config.toml"]
         assert "GITHUB_TOKEN" in config_toml
+        assert 'model = "gpt-4o"' in config_toml
         apps.patch_namespaced_deployment.assert_called_once()
+
+    def test_restart_propagates_non_404_config_patch_error_without_pod_restart(self):
+        rm, core, apps = _make_runtime()
+        env_secret = MagicMock()
+        env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
+        core.read_namespaced_secret.return_value = env_secret
+        core.patch_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=500)
+
+        with pytest.raises(k8s_client.exceptions.ApiException):
+            rm._lifecycle.restart_if_running("user1")
+
+        apps.patch_namespaced_deployment.assert_not_called()
+
+    def test_restart_propagates_non_404_deployment_patch_error(self):
+        rm, core, apps = _make_runtime()
+        env_secret = MagicMock()
+        env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
+        core.read_namespaced_secret.return_value = env_secret
+        apps.patch_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(
+            status=500
+        )
+
+        with pytest.raises(k8s_client.exceptions.ApiException):
+            rm._lifecycle.restart_if_running("user1")
 
 
 class TestListIdle:
@@ -360,6 +487,68 @@ class TestWorkspaceFiles:
         cm.data = {"SOUL.md": _workspace_default("SOUL.md")}
         core.read_namespaced_config_map.return_value = cm
         assert rm.get_workspace_file("user1", "SOUL.md") is None
+
+    def test_get_user_model_returns_override_when_allowed(self):
+        rm, core, _ = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {"MODEL": "gpt-4o"}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.get_user_model("user1") == "gpt-4o"
+
+    def test_get_user_model_returns_default_when_absent(self):
+        rm, core, _ = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.get_user_model("user1") == "gpt-4o-mini"
+
+    def test_get_user_model_returns_default_when_stale(self):
+        rm, core, _ = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {"MODEL": "removed-model"}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.get_user_model("user1") == "gpt-4o-mini"
+
+    def test_set_user_model_rejects_unknown_model(self):
+        rm, _, _ = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+
+        assert rm.set_user_model("user1", "bad-model") is False
+
+    def test_set_user_model_patches_configmap_and_restarts(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+
+        assert rm.set_user_model("user1", "gpt-4o") is True
+
+        core.patch_namespaced_config_map.assert_called_once()
+        _, _, body = core.patch_namespaced_config_map.call_args[0]
+        assert body["data"]["MODEL"] == "gpt-4o"
+        apps.patch_namespaced_deployment.assert_called_once()
+
+    def test_reset_user_model_returns_false_when_absent(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.reset_user_model("user1") is False
+
+        core.patch_namespaced_config_map.assert_not_called()
+        apps.patch_namespaced_deployment.assert_not_called()
+
+    def test_reset_user_model_removes_override_and_restarts(self):
+        rm, core, apps = _make_runtime(_settings(allowed_models="gpt-4o-mini,gpt-4o"))
+        cm = MagicMock()
+        cm.data = {"MODEL": "gpt-4o"}
+        core.read_namespaced_config_map.return_value = cm
+
+        assert rm.reset_user_model("user1") is True
+
+        _, _, body = core.patch_namespaced_config_map.call_args[0]
+        assert body["data"]["MODEL"] is None
+        apps.patch_namespaced_deployment.assert_called_once()
 
     def test_ensure_identity_configmap_creates_on_first_call(self):
         rm, core, _ = _make_runtime()

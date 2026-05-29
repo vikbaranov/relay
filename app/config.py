@@ -1,7 +1,37 @@
 import logging
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+DEFAULT_ALLOWED_COMMANDS = [
+    "git",
+    "ls",
+    "cat",
+    "grep",
+    "find",
+    "echo",
+    "pwd",
+    "wc",
+    "head",
+    "tail",
+    "date",
+    "df",
+    "du",
+    "uname",
+    "uptime",
+    "hostname",
+    "gh",
+    "rm",
+    "mv",
+    "cp",
+    "mkdir",
+    "touch",
+    "bash",
+    "curl",
+    "zeroclaw",
+]
 
 
 class Settings(BaseSettings):
@@ -36,7 +66,8 @@ class Settings(BaseSettings):
 
     openai_api_key: str
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_model: str = "gpt-4o-mini"
+    allowed_models: Annotated[list[str], NoDecode]
+    allowed_commands: Annotated[list[str], NoDecode] = DEFAULT_ALLOWED_COMMANDS
 
     user_pvc_size: str = "5Gi"
     user_pvc_storage_class: str | None = None
@@ -51,6 +82,28 @@ class Settings(BaseSettings):
     log_level: int = logging.INFO
 
     ssl_verify: bool = False
+
+    @field_validator("allowed_models", mode="before")
+    @classmethod
+    def _parse_allowed_models(cls, value):
+        if isinstance(value, str):
+            models = [item.strip() for item in value.split(",") if item.strip()]
+        else:
+            models = list(value or [])
+        if not models:
+            raise ValueError("ALLOWED_MODELS must contain at least one model")
+        return models
+
+    @field_validator("allowed_commands", mode="before")
+    @classmethod
+    def _parse_allowed_commands(cls, value):
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return list(value or [])
+
+    @property
+    def default_model(self) -> str:
+        return self.allowed_models[0]
 
     model_config = SettingsConfigDict(
         env_file=".env",
