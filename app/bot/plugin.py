@@ -14,17 +14,23 @@ from app.bot.formatting import _CURSOR, patch_post
 from app.bot.stream_handler import StreamHandler
 from app.config import Settings
 from app.identity import object_name, session_id
-from app.k8s.runtime import RuntimeManager
+from app.k8s.lifecycle import LifecycleManager
+from app.k8s.user_state import UserStateManager
 from app.zeroclaw.client import chat_stream
 
 logger = logging.getLogger(__name__)
 
 
 class ZeroClawPlugin(Plugin):
-    def __init__(self, settings: Settings, runtime: RuntimeManager) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        lifecycle: LifecycleManager,
+        user_state: UserStateManager,
+    ) -> None:
         super().__init__()
         self._settings = settings
-        self._runtime = runtime
+        self._lifecycle = lifecycle
         self._secret = settings.k8s_name_secret.encode()
         self._sessions: dict[str, _SessionState] = {}
         self._base_url: str = (
@@ -33,27 +39,17 @@ class ZeroClawPlugin(Plugin):
         self._approval = ApprovalManager(get_driver=lambda: self.driver, base_url=self._base_url)
         self._commands = CommandHandler(
             get_driver=lambda: self.driver,
-            runtime=self._runtime,
+            lifecycle=lifecycle,
+            user_state=user_state,
             base_url=self._base_url,
             allowed_models=settings.allowed_models,
             sessions=self._sessions,
         )
         self._dialogs = DialogHandler(
             get_driver=lambda: self.driver,
-            runtime=self._runtime,
+            user_state=user_state,
             base_url=self._base_url,
         )
-
-    # ── backward-compat shims used by tests ───────────────────────────────────
-
-    @property
-    def _pending_approvals(self) -> dict:
-        return self._approval._pending
-
-    def _request_approval(
-        self, frame: dict, channel_id: str, root_id: str, main_post_id: str
-    ) -> ApprovalDecision:
-        return self._approval.request(frame, channel_id, root_id, main_post_id)
 
     # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -153,7 +149,7 @@ class ZeroClawPlugin(Plugin):
             heartbeat_stop.set()
             hb.join(timeout=1)
 
-        self._runtime.update_last_activity(runtime_key)
+        self._lifecycle.update_last_activity(runtime_key)
         metrics.messages_total.labels(outcome="success").inc()
         metrics.message_duration.labels(outcome="success").observe(time.monotonic() - t0)
         logger.info("message_done", extra=extra)
@@ -189,13 +185,13 @@ class ZeroClawPlugin(Plugin):
         post_id = post["id"]
 
         t_ensure = time.monotonic()
-        service_dns = self._runtime.ensure_runtime(runtime_key, user_id=message.user_id)
+        service_dns = self._lifecycle.ensure_all(runtime_key, model_user_id=message.user_id)
         metrics.ensure_runtime_seconds.observe(time.monotonic() - t_ensure)
 
-        if not self._runtime.is_ready(service_dns):
+        if not self._lifecycle.is_ready(service_dns):
             try:
                 t_ready = time.monotonic()
-                self._runtime.wait_ready(service_dns)
+                self._lifecycle.wait_ready(service_dns)
                 ready_elapsed = round(time.monotonic() - t_ready)
                 patch_post(self.driver, post_id, f"Готов. Заняло {ready_elapsed}с")
             except TimeoutError:

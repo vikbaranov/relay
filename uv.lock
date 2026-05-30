@@ -1630,13 +1630,14 @@ wheels = [
 
 [[package]]
 name = "relay"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "kubernetes" },
     { name = "mmpy-bot" },
     { name = "prometheus-client" },
     { name = "pydantic-settings" },
+    { name = "tomli-w" },
     { name = "websockets" },
 ]
 
@@ -1658,6 +1659,7 @@ requires-dist = [
     { name = "mmpy-bot", specifier = ">=2.2.1" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "tomli-w", specifier = ">=1.0" },
     { name = "websockets", specifier = ">=12.0" },
 ]
 

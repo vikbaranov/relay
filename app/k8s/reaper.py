@@ -6,15 +6,15 @@ import time
 
 from app import metrics
 from app.config import Settings
-from app.k8s.runtime import RuntimeManager
+from app.k8s.lifecycle import LifecycleManager
 
 logger = logging.getLogger(__name__)
 
 
 class IdleReaper(threading.Thread):
-    def __init__(self, runtime: RuntimeManager, settings: Settings) -> None:
+    def __init__(self, lifecycle: LifecycleManager, settings: Settings) -> None:
         super().__init__(daemon=True, name="idle-reaper")
-        self._runtime = runtime
+        self._lifecycle = lifecycle
         self._settings = settings
         self._stop = threading.Event()
 
@@ -30,9 +30,9 @@ class IdleReaper(threading.Thread):
         while not self._stop.wait(self._settings.reaper_interval_seconds):
             t0 = time.monotonic()
             try:
-                idle = self._runtime.list_idle(self._settings.idle_timeout_seconds)
+                idle = self._lifecycle.list_idle(self._settings.idle_timeout_seconds)
                 for name in idle:
-                    self._runtime.scale_down(name)
+                    self._lifecycle.scale_down(name)
                     metrics.pods_reaped_total.inc()
                 if idle:
                     logger.info("reaped %d idle runtimes", len(idle))

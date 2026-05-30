@@ -9,3 +9,5 @@ build/
 *.*_cache
 .coverage
 .kubeconfig
+docs
+zeroclaw-config.toml
