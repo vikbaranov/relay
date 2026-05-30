@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/vikbaranov/relay/compare/v0.7.0...v0.7.1) (2026-05-30)
+
+
+### Code Refactoring
+
+* remove midleware class ([#18](https://github.com/vikbaranov/relay/issues/18)) ([f301d6b](https://github.com/vikbaranov/relay/commit/f301d6b9291a886e70b6aae8cf175631adbbf0a2))
+
 ## [0.7.0](https://github.com/vikbaranov/relay/compare/v0.6.0...v0.7.0) (2026-05-29)
 
 
