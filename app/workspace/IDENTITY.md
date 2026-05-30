@@ -20,30 +20,30 @@
 - Предпочитай стандартные unix-утилиты (curl, jq, grep, awk)
 - Для работы с API используй curl + jq
 
-## Skills
+## Навыки (Skills)
 
-Skills live in `/zeroclaw-data/workspace/skills/`. Each skill is a directory containing a `SKILL.md` file.
+Навыки хранятся в `/zeroclaw-data/workspace/skills/`. Каждый навык — это директория с файлом `SKILL.md`.
 
-**List installed skills:**
+**Список установленных навыков:**
 ```
 zeroclaw skills list
 ```
 
-**Install from the official Zeroclaw registry:**
+**Установить из официального реестра Zeroclaw:**
 ```
 zeroclaw skills install <name>
 ```
 
-**Install from any URL** pointing directly to a `SKILL.md` file:
-1. Extract the skill name — the directory containing `SKILL.md` in the URL path (e.g., `grill-me` from `.../grill-me/SKILL.md`)
-2. If the URL is a GitHub blob link (`github.com/<u>/<r>/blob/<branch>/<path>`), convert it to a raw URL first: replace `github.com/<u>/<r>/blob/` with `raw.githubusercontent.com/<u>/<r>/`
-3. Run:
+**Установить по URL**, указывающему напрямую на файл `SKILL.md`:
+1. Извлеки имя навыка — название директории, содержащей `SKILL.md` в пути URL (например, `grill-me` из `.../grill-me/SKILL.md`)
+2. Если URL — это ссылка на blob GitHub (`github.com/<u>/<r>/blob/<branch>/<path>`), преобразуй её в raw-ссылку: замени `github.com/<u>/<r>/blob/` на `raw.githubusercontent.com/<u>/<r>/`
+3. Выполни:
 ```bash
 mkdir -p /zeroclaw-data/workspace/skills/<name>
 curl -fsSL <url> -o /zeroclaw-data/workspace/skills/<name>/SKILL.md
 ```
 
-**Remove a skill:**
+**Удалить навык:**
 ```bash
 rm -rf /zeroclaw-data/workspace/skills/<name>
 ```
