@@ -3,6 +3,11 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from mmpy_bot.wrappers import Message
+
+from app.k8s.lifecycle import LifecycleManager
+from app.k8s.user_state import UserStateManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,13 +21,15 @@ class CommandHandler:
     def __init__(
         self,
         get_driver: Callable,
-        runtime,
+        lifecycle: LifecycleManager,
+        user_state: UserStateManager,
         base_url: str,
         allowed_models: list[str],
-        sessions: dict,
+        sessions: dict[str, _SessionState],
     ) -> None:
         self._get_driver = get_driver
-        self._runtime = runtime
+        self._lifecycle = lifecycle
+        self._user_state = user_state
         self._base_url = base_url
         self._allowed_models = allowed_models
         self._sessions = sessions
@@ -31,7 +38,9 @@ class CommandHandler:
     def _driver(self):
         return self._get_driver()
 
-    def handle(self, message, scope: str, root_id: str, runtime_key: str | None = None) -> bool:
+    def handle(
+        self, message: Message, scope: str, root_id: str, runtime_key: str | None = None
+    ) -> bool:
         command = message.text.strip().split(maxsplit=1)[0].lower()
 
         if command in ("!new", "!clear"):
@@ -121,7 +130,7 @@ class CommandHandler:
         if not (did_change and runtime_key and runtime_key != user_id):
             return
         try:
-            self._runtime.restart_runtime(runtime_key, user_id)
+            self._lifecycle.restart_if_running(runtime_key, model_user_id=user_id)
         except Exception:
             logger.exception(
                 "channel_runtime_restart_failed runtime_key=%s",
@@ -129,7 +138,7 @@ class CommandHandler:
                 extra={"mm_user_id": user_id},
             )
 
-    def _handle_env(self, message, root_id: str, runtime_key: str | None = None) -> None:
+    def _handle_env(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
         parts = message.text.strip().split(maxsplit=2)
         sub = parts[1].lower() if len(parts) > 1 else ""
 
@@ -174,7 +183,7 @@ class CommandHandler:
 
         if sub == "list":
             try:
-                keys = self._runtime.list_user_envs(message.user_id)
+                keys = self._user_state.list_user_envs(message.user_id)
                 reply = (
                     ("Переменные окружения:\n" + "\n".join(f"- `{k}`" for k in keys))
                     if keys
@@ -189,7 +198,7 @@ class CommandHandler:
         if sub == "del" and len(parts) == 3:
             key = parts[2]
             try:
-                found = self._runtime.delete_user_env(message.user_id, key)
+                found = self._user_state.delete_user_env(message.user_id, key)
                 self._restart_channel_runtime(runtime_key, message.user_id, did_change=found)
                 reply = (
                     f"✅ `{key}` удалён. Сессия будет перезапущена."
@@ -215,14 +224,14 @@ class CommandHandler:
             root_id=root_id,
         )
 
-    def _handle_model(self, message, root_id: str, runtime_key: str | None = None) -> None:
+    def _handle_model(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
         parts = message.text.strip().split(maxsplit=2)
         sub = parts[1].lower() if len(parts) > 1 else "show"
         allowed = self._allowed_models
 
         if sub == "show":
             try:
-                model = self._runtime.get_user_model(message.user_id)
+                model = self._user_state.get_user_model(message.user_id)
                 reply = f"Текущая модель: `{model}`"
             except Exception:
                 logger.exception("model_show_failed", extra={"mm_user_id": message.user_id})
@@ -232,7 +241,7 @@ class CommandHandler:
 
         if sub == "list":
             try:
-                current = self._runtime.get_user_model(message.user_id)
+                current = self._user_state.get_user_model(message.user_id)
                 lines = [
                     f"- `{model}`" + (" — текущая" if model == current else "") for model in allowed
                 ]
@@ -246,7 +255,7 @@ class CommandHandler:
         if sub == "set" and len(parts) == 3:
             model = parts[2]
             try:
-                saved = self._runtime.set_user_model(message.user_id, model)
+                saved = self._user_state.set_user_model(message.user_id, model)
                 self._restart_channel_runtime(runtime_key, message.user_id, did_change=saved)
                 if saved:
                     reply = f"✅ Модель `{model}` сохранена. Сессия будет перезапущена."
@@ -264,7 +273,7 @@ class CommandHandler:
 
         if sub == "reset":
             try:
-                changed = self._runtime.reset_user_model(message.user_id)
+                changed = self._user_state.reset_user_model(message.user_id)
                 self._restart_channel_runtime(runtime_key, message.user_id, did_change=changed)
                 reply = (
                     f"✅ Модель сброшена к `{allowed[0]}`. Сессия будет перезапущена."
@@ -290,14 +299,14 @@ class CommandHandler:
         )
 
     def _handle_workspace_file(
-        self, message, root_id: str, filename: str, runtime_key: str | None = None
+        self, message: Message, root_id: str, filename: str, runtime_key: str | None = None
     ) -> None:
         parts = message.text.strip().split(maxsplit=1)
         sub = parts[1].lower() if len(parts) > 1 else "show"
         cmd = filename.replace(".md", "").lower()
 
         if sub == "show":
-            content = self._runtime.get_workspace_file(message.user_id, filename)
+            content = self._user_state.get_workspace_file(message.user_id, filename)
             if content is None:
                 reply = (
                     f"`{filename}` не переопределён — используется глобальный файл по умолчанию."
@@ -308,7 +317,7 @@ class CommandHandler:
             return
 
         if sub == "set":
-            current = self._runtime.get_workspace_file(message.user_id, filename) or ""
+            current = self._user_state.get_workspace_file(message.user_id, filename) or ""
             self._driver.posts.create_post(
                 options={
                     "channel_id": message.channel_id,
@@ -344,7 +353,7 @@ class CommandHandler:
 
         if sub == "reset":
             try:
-                found = self._runtime.reset_workspace_file(message.user_id, filename)
+                found = self._user_state.reset_workspace_file(message.user_id, filename)
                 self._restart_channel_runtime(runtime_key, message.user_id, did_change=found)
                 reply = (
                     f"✅ `{filename}` был сброшен. Сессия будет перезапущена."

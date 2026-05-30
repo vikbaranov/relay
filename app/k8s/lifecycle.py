@@ -1,8 +1,11 @@
-import json
 import logging
 import pathlib
+import threading
+import time
+import urllib.request
 from datetime import UTC, datetime
 
+import tomli_w
 from kubernetes import client
 
 from app import metrics
@@ -17,12 +20,12 @@ from app.identity import (
 
 logger = logging.getLogger(__name__)
 
-LABEL_PART_OF = "ai.relay.io/part-of"
-ANNOTATION_LAST_ACTIVITY = "ai.relay.io/last-activity"
-PART_OF_VALUE = "zeroclaw-runtime"
-
 _WORKSPACE_DEFAULTS = pathlib.Path(__file__).parent.parent / "workspace"
 WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md")
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _workspace_default(filename: str) -> str | None:
@@ -57,10 +60,7 @@ class LifecycleManager:
         self._ns = ns
         self._configmap_ensured = False
         self._provider_secret_ensured = False
-
-    @staticmethod
-    def _now_iso() -> str:
-        return datetime.now(UTC).isoformat()
+        self._ensure_lock = threading.Lock()
 
     def ensure_all(self, mm_user_id: str, *, model_user_id: str | None = None) -> str:
         """Create or wake up per-user K8s resources. Returns internal service DNS."""
@@ -125,7 +125,7 @@ class LifecycleManager:
                     extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
                 )
                 raise
-        now = self._now_iso()
+        now = _now_iso()
         try:
             self._apps.patch_namespaced_deployment(
                 name,
@@ -151,87 +151,88 @@ class LifecycleManager:
             raise
 
     def _ensure_configmap(self) -> None:
-        if self._configmap_ensured:
-            return
-        s = self._settings
-        data: dict[str, str] = _workspace_default_data()
-        body = client.V1ConfigMap(
-            metadata=client.V1ObjectMeta(name=s.zeroclaw_configmap, namespace=self._ns),
-            data=data,
-        )
-        try:
-            self._core.read_namespaced_config_map(s.zeroclaw_configmap, self._ns)
-            self._core.replace_namespaced_config_map(s.zeroclaw_configmap, self._ns, body)
-        except client.exceptions.ApiException as exc:
-            if exc.status != 404:
-                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_CONFIGMAP).inc()
-                raise
-            self._core.create_namespaced_config_map(self._ns, body)
-            logger.info("created ConfigMap %s", s.zeroclaw_configmap)
-        self._configmap_ensured = True
+        with self._ensure_lock:
+            if self._configmap_ensured:
+                return
+            s = self._settings
+            data: dict[str, str] = _workspace_default_data()
+            body = client.V1ConfigMap(
+                metadata=client.V1ObjectMeta(name=s.zeroclaw_configmap, namespace=self._ns),
+                data=data,
+            )
+            try:
+                self._core.read_namespaced_config_map(s.zeroclaw_configmap, self._ns)
+                self._core.replace_namespaced_config_map(s.zeroclaw_configmap, self._ns, body)
+            except client.exceptions.ApiException as exc:
+                if exc.status != 404:
+                    metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_CONFIGMAP).inc()
+                    raise
+                self._core.create_namespaced_config_map(self._ns, body)
+                logger.info("created ConfigMap %s", s.zeroclaw_configmap)
+            self._configmap_ensured = True
 
     def _zeroclaw_config_toml(self, env_keys: list[str], model: str | None = None) -> str:
         s = self._settings
         effective_model = model or s.default_model
-        allowed_commands = json.dumps(s.allowed_commands, indent=4)
-        sections = [
-            "[gateway]",
-            "allow_public_bind = true",
-            "",
-            "[autonomy]",
-            'level = "full"',
-            "max_actions_per_hour = 100000",
-            "",
-            f"shell_env_passthrough = {json.dumps(env_keys)}",
-            f"allowed_commands = {allowed_commands}",
-            "",
-            "[agent]",
-            "max_tool_iterations = 150",
-            "command_timeout = 180",
-            "",
-            "[http_request]",
-            "allow_private_hosts = true",
-            "",
-            "[web_fetch]",
-            'allowed_domain = ["*"]',
-            'allowed_private_hosts = ["192.168.100.231", "192.168.0.0/16",'
-            ' "172.16.0.0/12", "10.0.0.0/8"]',
-            "",
-            "[providers]",
-            f'fallback = "{s.openai_base_url}"',
-            "",
-            f'[providers.models."{s.openai_base_url}"]',
-            f'model = "{effective_model}"',
-            f'api_key = "{s.openai_api_key}"',
-            "",
-        ]
-        return "\n".join(sections)
+        doc: dict = {
+            "gateway": {"allow_public_bind": True},
+            "autonomy": {
+                "level": "full",
+                "max_actions_per_hour": 100000,
+                "shell_env_passthrough": env_keys,
+                "allowed_commands": s.allowed_commands,
+            },
+            "agent": {"max_tool_iterations": 150, "command_timeout": 180},
+            "http_request": {"allow_private_hosts": True},
+            "web_fetch": {
+                "allowed_domain": ["*"],
+                "allowed_private_hosts": [
+                    "192.168.100.231",
+                    "192.168.0.0/16",
+                    "172.16.0.0/12",
+                    "10.0.0.0/8",
+                ],
+            },
+            "providers": {
+                "fallback": s.openai_base_url,
+                "models": {
+                    s.openai_base_url: {
+                        "model": effective_model,
+                        "api_key": s.openai_api_key,
+                    }
+                },
+            },
+        }
+        return tomli_w.dumps(doc)
 
     def _ensure_provider_credentials_secret(self) -> None:
-        if self._provider_secret_ensured:
-            return
-        s = self._settings
-        body = client.V1Secret(
-            metadata=client.V1ObjectMeta(
-                name=s.zeroclaw_provider_credentials_secret,
-                namespace=self._ns,
-            ),
-            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml([])},
-        )
-        try:
-            self._core.read_namespaced_secret(s.zeroclaw_provider_credentials_secret, self._ns)
-            self._core.replace_namespaced_secret(
-                s.zeroclaw_provider_credentials_secret, self._ns, body
+        with self._ensure_lock:
+            if self._provider_secret_ensured:
+                return
+            s = self._settings
+            body = client.V1Secret(
+                metadata=client.V1ObjectMeta(
+                    name=s.zeroclaw_provider_credentials_secret,
+                    namespace=self._ns,
+                ),
+                string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml([])},
             )
-        except client.exceptions.ApiException as exc:
-            if exc.status != 404:
-                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_ENSURE_PROVIDER_CREDENTIALS).inc()
-                raise
-            self._core.create_namespaced_secret(self._ns, body)
-            logger.info(
-                "created provider credentials Secret %s", s.zeroclaw_provider_credentials_secret
-            )
-        self._provider_secret_ensured = True
+            try:
+                self._core.read_namespaced_secret(s.zeroclaw_provider_credentials_secret, self._ns)
+                self._core.replace_namespaced_secret(
+                    s.zeroclaw_provider_credentials_secret, self._ns, body
+                )
+            except client.exceptions.ApiException as exc:
+                if exc.status != 404:
+                    metrics.k8s_errors_total.labels(
+                        op=metrics.K8S_OP_ENSURE_PROVIDER_CREDENTIALS
+                    ).inc()
+                    raise
+                self._core.create_namespaced_secret(self._ns, body)
+                logger.info(
+                    "created provider credentials Secret %s", s.zeroclaw_provider_credentials_secret
+                )
+            self._provider_secret_ensured = True
 
     def _get_user_env_keys(self, mm_user_id: str) -> list[str]:
         sname = env_secret_name(self._secret, mm_user_id)
@@ -390,7 +391,7 @@ class LifecycleManager:
             deploy = self._apps.read_namespaced_deployment(name, self._ns)
             self._ensure_deployment_config_volume(name, deploy, mm_user_id)
             if (deploy.spec.replicas or 0) == 0:
-                now = self._now_iso()
+                now = _now_iso()
                 self._apps.patch_namespaced_deployment(
                     name,
                     self._ns,
@@ -547,3 +548,94 @@ class LifecycleManager:
                 }
             },
         )
+
+    # ── runtime health / activity ──────────────────────────────────────────────
+
+    def is_ready(self, service_dns: str) -> bool:
+        url = f"http://{service_dns}:{self._settings.zeroclaw_port}/health"
+        try:
+            with urllib.request.urlopen(url, timeout=1) as r:  # nosec B310
+                return r.status == 200
+        except Exception:
+            logger.debug("health_check_failed service_dns=%s", service_dns, exc_info=True)
+            return False
+
+    def wait_ready(self, service_dns: str) -> None:
+        """Poll /health until 200 or timeout. Raises TimeoutError."""
+        s = self._settings
+        t0 = time.monotonic()
+        deadline = t0 + s.pod_ready_timeout_seconds
+        url = f"http://{service_dns}:{s.zeroclaw_port}/health"
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=2) as r:  # nosec B310
+                    if r.status == 200:
+                        elapsed = time.monotonic() - t0
+                        metrics.pod_startup_seconds.observe(elapsed)
+                        logger.info(
+                            "pod_ready service_dns=%s elapsed=%.1fs",
+                            service_dns,
+                            elapsed,
+                            extra={"namespace": self._ns},
+                        )
+                        return
+            except Exception:
+                logger.debug("pod_not_ready_yet service_dns=%s", service_dns, exc_info=True)
+            time.sleep(1.0)
+        raise TimeoutError(
+            f"ZeroClaw pod not ready after {s.pod_ready_timeout_seconds}s: {service_dns}"
+        )
+
+    def update_last_activity(self, mm_user_id: str) -> None:
+        s = self._settings
+        name = object_name(self._secret, mm_user_id)
+        now = _now_iso()
+        try:
+            self._apps.patch_namespaced_deployment(
+                name,
+                self._ns,
+                {"metadata": {"annotations": {s.k8s_annotation_last_activity: now}}},
+            )
+        except Exception:
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_UPDATE_LAST_ACTIVITY).inc()
+            logger.warning(
+                "failed to update last-activity for %s",
+                name,
+                exc_info=True,
+                extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+            )
+
+    def list_idle(self, ttl_seconds: int) -> list[str]:
+        """Return names of Deployments idle longer than ttl_seconds."""
+        s = self._settings
+        idle: list[str] = []
+        try:
+            deploys = self._apps.list_namespaced_deployment(
+                self._ns,
+                label_selector=f"{s.k8s_label_part_of}={s.k8s_part_of_value}",
+            )
+        except Exception:
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_LIST_IDLE).inc()
+            logger.error(
+                "failed to list deployments for idle check",
+                exc_info=True,
+                extra={"namespace": self._ns},
+            )
+            return idle
+
+        cutoff = time.time() - ttl_seconds
+        running = 0
+        for d in deploys.items:
+            if (d.spec.replicas or 0) == 0:
+                continue
+            running += 1
+            last = (d.metadata.annotations or {}).get(s.k8s_annotation_last_activity)
+            if last:
+                try:
+                    ts = datetime.fromisoformat(last).timestamp()
+                    if ts < cutoff:
+                        idle.append(d.metadata.name)
+                except ValueError:
+                    pass
+        metrics.active_pods.set(running)
+        return idle

@@ -7,8 +7,9 @@ from app import health
 from app.bot.plugin import ZeroClawPlugin
 from app.config import Settings
 from app.k8s.client import build_k8s_clients
+from app.k8s.lifecycle import LifecycleManager
 from app.k8s.reaper import IdleReaper
-from app.k8s.runtime import RuntimeManager
+from app.k8s.user_state import UserStateManager
 from app.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -23,12 +24,23 @@ def run_bot(settings: Settings) -> None:
         mode=settings.k8s_mode,
         kubeconfig_path=settings.k8s_kubeconfig_path,
     )
-    runtime = RuntimeManager(settings=settings, core=core, apps=apps)
+    secret = settings.k8s_name_secret.encode()
+    ns = settings.k8s_namespace
 
-    reaper = IdleReaper(runtime=runtime, settings=settings)
+    lifecycle = LifecycleManager(settings=settings, core=core, apps=apps, secret=secret, ns=ns)
+    user_state = UserStateManager(
+        core=core,
+        apps=apps,
+        secret=secret,
+        ns=ns,
+        restart_fn=lifecycle.restart_if_running,
+        allowed_models=settings.allowed_models,
+    )
+
+    reaper = IdleReaper(lifecycle=lifecycle, settings=settings)
     reaper.start()
 
-    plugin = ZeroClawPlugin(settings=settings, runtime=runtime)
+    plugin = ZeroClawPlugin(settings=settings, lifecycle=lifecycle, user_state=user_state)
 
     bot_settings = MmpySettings(
         MATTERMOST_URL=settings.mattermost_url,

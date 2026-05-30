@@ -81,7 +81,7 @@ class Settings(BaseSettings):
 
     log_level: int = logging.INFO
 
-    ssl_verify: bool = False
+    ssl_verify: bool = True
 
     @field_validator("allowed_models", mode="before")
     @classmethod

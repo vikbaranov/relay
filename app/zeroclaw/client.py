@@ -4,13 +4,12 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable, Iterator
-from typing import Literal
 
 import websockets
 
-logger = logging.getLogger(__name__)
+from app.types import ApprovalDecision
 
-ApprovalDecision = Literal["approve", "deny", "always", "timeout"]
+logger = logging.getLogger(__name__)
 
 
 async def _chat_stream_async(

@@ -2,21 +2,21 @@ import json
 import logging
 from collections.abc import Callable
 
+from app.bot.formatting import patch_props
+from app.k8s.user_state import UserStateManager
+
 logger = logging.getLogger(__name__)
 
 
 class DialogHandler:
-    def __init__(self, get_driver: Callable, runtime, base_url: str) -> None:
+    def __init__(self, get_driver: Callable, user_state: UserStateManager, base_url: str) -> None:
         self._get_driver = get_driver
-        self._runtime = runtime
+        self._user_state = user_state
         self._base_url = base_url
 
     @property
     def _driver(self):
         return self._get_driver()
-
-    def _patch_props(self, post_id: str, text: str) -> None:
-        self._driver.posts.patch_post(post_id, {"props": {"attachments": [{"text": text}]}})
 
     def open_workspace_file_dialog(self, event) -> None:
         context = event.context or {}
@@ -66,7 +66,9 @@ class DialogHandler:
 
         if body.get("cancelled"):
             if prompt_post_id:
-                self._patch_props(prompt_post_id, f"❌ Редактирование `{filename}` отменено.")
+                patch_props(
+                    self._driver, prompt_post_id, f"❌ Редактирование `{filename}` отменено."
+                )
             self._driver.respond_to_web(event, {})
             return
 
@@ -78,7 +80,7 @@ class DialogHandler:
             return
 
         try:
-            self._runtime.set_workspace_file(user_id, filename, content)
+            self._user_state.set_workspace_file(user_id, filename, content)
             result = f"✅ `{filename}` сохранён. Сессия будет перезапущена автоматически."
         except Exception:
             logger.exception(
@@ -87,7 +89,7 @@ class DialogHandler:
             result = f"❌ Ошибка при сохранении `{filename}`."
 
         if prompt_post_id:
-            self._patch_props(prompt_post_id, result)
+            patch_props(self._driver, prompt_post_id, result)
         else:
             self._driver.create_post(channel_id=channel_id, message=result, root_id=root_id)
         self._driver.respond_to_web(event, {})
@@ -139,7 +141,7 @@ class DialogHandler:
 
         if body.get("cancelled"):
             if prompt_post_id:
-                self._patch_props(prompt_post_id, f"❌ Ввод `{key}` отменён.")
+                patch_props(self._driver, prompt_post_id, f"❌ Ввод `{key}` отменён.")
             self._driver.respond_to_web(event, {})
             return
 
@@ -151,14 +153,14 @@ class DialogHandler:
             return
 
         try:
-            self._runtime.set_user_env(user_id, key, value)
+            self._user_state.set_user_env(user_id, key, value)
             result = f"✅ `{key}` сохранён. Сессия будет перезапущена автоматически."
         except Exception:
             logger.exception("env_set_failed key=%s", key, extra={"mm_user_id": user_id})
             result = f"❌ Ошибка при сохранении `{key}`."
 
         if prompt_post_id:
-            self._patch_props(prompt_post_id, result)
+            patch_props(self._driver, prompt_post_id, result)
         else:
             self._driver.create_post(channel_id=channel_id, message=result, root_id=root_id)
         self._driver.respond_to_web(event, {})
