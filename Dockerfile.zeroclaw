@@ -1,4 +1,4 @@
-FROM alpine:3.21 AS gh-installer
+FROM alpine:3.23 AS gh-installer
 ARG GH_VERSION=2.52.0
 RUN apk add --no-cache curl tar && \
     ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
