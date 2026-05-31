@@ -9,6 +9,7 @@ from app.config import Settings
 from app.k8s.client import build_k8s_clients
 from app.k8s.lifecycle import LifecycleManager
 from app.k8s.reaper import IdleReaper
+from app.k8s.skills import SkillManager
 from app.k8s.user_state import UserStateManager
 from app.logging import configure_logging
 
@@ -36,11 +37,22 @@ def run_bot(settings: Settings) -> None:
         restart_fn=lifecycle.restart_if_running,
         allowed_models=settings.allowed_models,
     )
+    skill_manager = SkillManager(
+        core=core,
+        secret=secret,
+        ns=ns,
+        workspace_path=settings.zeroclaw_data_path,
+    )
 
     reaper = IdleReaper(lifecycle=lifecycle, settings=settings)
     reaper.start()
 
-    plugin = ZeroClawPlugin(settings=settings, lifecycle=lifecycle, user_state=user_state)
+    plugin = ZeroClawPlugin(
+        settings=settings,
+        lifecycle=lifecycle,
+        user_state=user_state,
+        skill_manager=skill_manager,
+    )
 
     bot_settings = MmpySettings(
         MATTERMOST_URL=settings.mattermost_url,

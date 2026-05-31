@@ -19,3 +19,31 @@
 ## Общие CLI-задачи
 - Предпочитай стандартные unix-утилиты (curl, jq, grep, awk)
 - Для работы с API используй curl + jq
+
+## Навыки (Skills)
+
+Навыки хранятся в `/zeroclaw-data/workspace/skills/`. Каждый навык — это директория с файлом `SKILL.md`.
+
+**Список установленных навыков:**
+```
+zeroclaw skills list
+```
+
+**Установить из официального реестра Zeroclaw:**
+```
+zeroclaw skills install <name>
+```
+
+**Установить по URL**, указывающему напрямую на файл `SKILL.md`:
+1. Извлеки имя навыка — название директории, содержащей `SKILL.md` в пути URL (например, `grill-me` из `.../grill-me/SKILL.md`)
+2. Если URL — это ссылка на blob GitHub (`github.com/<u>/<r>/blob/<branch>/<path>`), преобразуй её в raw-ссылку: замени `github.com/<u>/<r>/blob/` на `raw.githubusercontent.com/<u>/<r>/`
+3. Выполни:
+```bash
+mkdir -p /zeroclaw-data/workspace/skills/<name>
+curl -fsSL <url> -o /zeroclaw-data/workspace/skills/<name>/SKILL.md
+```
+
+**Удалить навык:**
+```bash
+rm -rf /zeroclaw-data/workspace/skills/<name>
+```
