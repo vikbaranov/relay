@@ -363,7 +363,7 @@ class SkillCommandHandler:
         self._driver.create_post(
             channel_id=channel_id,
             message=(
-                f"Некорректное имя навыка: `{name}`. " "Используйте строчные буквы, цифры и дефисы."
+                f"Некорректное имя навыка: `{name}`. Используйте строчные буквы, цифры и дефисы."
             ),
             root_id=root_id,
         )
