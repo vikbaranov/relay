@@ -418,6 +418,72 @@ class TestEnsureRuntime:
         identity_name = identity_configmap_name(b"test-secret", "user1")
         assert any(identity_name in c for c in read_calls)
 
+    def test_user_config_autonomy_defaults_to_full(self):
+        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        lifecycle.ensure_all("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'level = "full"' in config_toml
+
+    def test_user_config_uses_supervised_autonomy_override(self):
+        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        identity_cm = MagicMock()
+        identity_cm.data = {"AUTONOMY": "supervised"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        lifecycle.ensure_all("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'level = "supervised"' in config_toml
+
+    def test_user_config_ignores_invalid_autonomy_override(self):
+        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        identity_cm = MagicMock()
+        identity_cm.data = {"AUTONOMY": "invalid"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        lifecycle.ensure_all("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'level = "full"' in config_toml
+
+    def test_restart_updates_user_config_with_autonomy(self):
+        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        identity_cm = MagicMock()
+        identity_cm.data = {"AUTONOMY": "supervised"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        env_secret = MagicMock()
+        env_secret.data = {}
+        core.read_namespaced_secret.return_value = env_secret
+
+        lifecycle.restart_if_running("user1")
+
+        patch_call = core.patch_namespaced_secret.call_args
+        config_toml = patch_call[0][2]["stringData"]["config.toml"]
+        assert 'level = "supervised"' in config_toml
+
     def test_deployment_mounts_identity_volume(self):
         lifecycle, _, core, apps = _make_lifecycle_and_state()
         core.read_namespaced_persistent_volume_claim.side_effect = (

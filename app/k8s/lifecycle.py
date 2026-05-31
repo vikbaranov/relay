@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _WORKSPACE_DEFAULTS = pathlib.Path(__file__).parent.parent / "workspace"
 WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md")
+_AUTONOMY_LEVELS = ("full", "supervised")
 
 
 def _now_iso() -> str:
@@ -106,9 +107,10 @@ class LifecycleManager:
         name = object_name(self._secret, mm_user_id)
         env_keys = self._get_user_env_keys(mm_user_id)
         model = self._get_user_model(model_user_id or mm_user_id)
+        autonomy = self._get_user_autonomy(mm_user_id)
         s = self._settings
         cname = zeroclaw_config_secret_name(self._secret, mm_user_id)
-        config_toml = self._zeroclaw_config_toml(env_keys, model)
+        config_toml = self._zeroclaw_config_toml(env_keys, model, autonomy)
         try:
             self._core.patch_namespaced_secret(
                 cname,
@@ -171,13 +173,15 @@ class LifecycleManager:
                 logger.info("created ConfigMap %s", s.zeroclaw_configmap)
             self._configmap_ensured = True
 
-    def _zeroclaw_config_toml(self, env_keys: list[str], model: str | None = None) -> str:
+    def _zeroclaw_config_toml(
+        self, env_keys: list[str], model: str | None = None, autonomy: str = "full"
+    ) -> str:
         s = self._settings
         effective_model = model or s.default_model
         doc: dict = {
             "gateway": {"allow_public_bind": True},
             "autonomy": {
-                "level": "full",
+                "level": autonomy,
                 "max_actions_per_hour": 100000,
                 "shell_env_passthrough": env_keys,
                 "allowed_commands": s.allowed_commands,
@@ -258,6 +262,19 @@ class LifecycleManager:
             return model
         return s.default_model
 
+    def _get_user_autonomy(self, mm_user_id: str) -> str:
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+            level = (cm.data or {}).get("AUTONOMY")
+            if level in _AUTONOMY_LEVELS:
+                return level
+            return "full"
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return "full"
+            raise
+
     def _ensure_user_zeroclaw_config(
         self,
         mm_user_id: str,
@@ -270,6 +287,7 @@ class LifecycleManager:
         s = self._settings
         name = zeroclaw_config_secret_name(self._secret, mm_user_id)
         model = self._get_user_model(model_user_id or mm_user_id)
+        autonomy = self._get_user_autonomy(mm_user_id)
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(
                 name=name,
@@ -277,7 +295,9 @@ class LifecycleManager:
                 labels=labels,
                 annotations=annotations,
             ),
-            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys, model)},
+            string_data={
+                s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys, model, autonomy)
+            },
         )
         try:
             self._core.read_namespaced_secret(name, self._ns)
