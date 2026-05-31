@@ -38,6 +38,7 @@ def run_bot(settings: Settings) -> None:
         restart_fn=lifecycle.restart_if_running,
         allowed_models=settings.allowed_models,
     )
+    lifecycle.set_user_state(user_state)
     skill_manager = SkillManager(
         core=core,
         secret=secret,
@@ -67,13 +68,7 @@ def run_bot(settings: Settings) -> None:
         WEBHOOK_HOST_PORT=settings.webhook_host_port,
     )
 
-    logger.info(
-        "starting relay",
-        extra={
-            "namespace": settings.k8s_namespace,
-            "zeroclaw_image": settings.zeroclaw_image,
-        },
-    )
+    logger.info("starting relay")
 
     health.mark_ready()
 

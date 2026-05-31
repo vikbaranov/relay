@@ -1,6 +1,7 @@
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from app.bot.formatting import patch_props
 from app.k8s.skills import PodNotRunningError, SkillError, SkillManager
@@ -9,24 +10,35 @@ from app.k8s.user_state import UserStateManager
 logger = logging.getLogger(__name__)
 
 
-class DialogHandler:
-    def __init__(
-        self,
-        get_driver: Callable,
-        user_state: UserStateManager,
-        skill_manager: SkillManager,
-        base_url: str,
-    ) -> None:
+@dataclass(frozen=True)
+class _SubmitContext:
+    pod_key: str
+    root_id: str
+    prompt_post_id: str
+    channel_id: str
+
+
+def _parse_submit(body: dict) -> tuple[dict, _SubmitContext]:
+    state = json.loads(body.get("state") or "{}")
+    return state, _SubmitContext(
+        pod_key=state.get("pod_key", ""),
+        root_id=state.get("root_id", ""),
+        prompt_post_id=state.get("prompt_post_id", ""),
+        channel_id=body.get("channel_id", ""),
+    )
+
+
+class WorkspaceDialogHandler:
+    def __init__(self, get_driver: Callable, user_state: UserStateManager, base_url: str) -> None:
         self._get_driver = get_driver
         self._user_state = user_state
-        self._skill_manager = skill_manager
         self._base_url = base_url
 
     @property
     def _driver(self):
         return self._get_driver()
 
-    def open_workspace_file_dialog(self, event) -> None:
+    def open(self, event) -> None:
         context = event.context or {}
         filename = context.get("filename", "")
         current = context.get("current", "")
@@ -63,19 +75,15 @@ class DialogHandler:
         )
         self._driver.respond_to_web(event, {})
 
-    def submit_workspace_file(self, event) -> None:
+    def submit(self, event) -> None:
         body = event.body
-        state = json.loads(body.get("state") or "{}")
+        state, ctx = _parse_submit(body)
         filename = state.get("filename", "")
-        pod_key = state.get("pod_key", "")
-        root_id = state.get("root_id", "")
-        prompt_post_id = state.get("prompt_post_id", "")
-        channel_id = body.get("channel_id", "")
 
         if body.get("cancelled"):
-            if prompt_post_id:
+            if ctx.prompt_post_id:
                 patch_props(
-                    self._driver, prompt_post_id, f"❌ Редактирование `{filename}` отменено."
+                    self._driver, ctx.prompt_post_id, f"❌ Редактирование `{filename}` отменено."
                 )
             self._driver.respond_to_web(event, {})
             return
@@ -88,21 +96,32 @@ class DialogHandler:
             return
 
         try:
-            self._user_state.set_workspace_file(pod_key, filename, content)
+            self._user_state.set_workspace_file(ctx.pod_key, filename, content)
             result = f"✅ `{filename}` сохранён. Сессия будет перезапущена автоматически."
         except Exception:
             logger.exception(
-                "workspace_file_set_failed filename=%s", filename, extra={"mm_user_id": pod_key}
+                "workspace_file_set_failed filename=%s", filename, extra={"mm_user_id": ctx.pod_key}
             )
             result = f"❌ Ошибка при сохранении `{filename}`."
 
-        if prompt_post_id:
-            patch_props(self._driver, prompt_post_id, result)
+        if ctx.prompt_post_id:
+            patch_props(self._driver, ctx.prompt_post_id, result)
         else:
-            self._driver.create_post(channel_id=channel_id, message=result, root_id=root_id)
+            self._driver.create_post(channel_id=ctx.channel_id, message=result, root_id=ctx.root_id)
         self._driver.respond_to_web(event, {})
 
-    def open_env_set_dialog(self, event) -> None:
+
+class EnvDialogHandler:
+    def __init__(self, get_driver: Callable, user_state: UserStateManager, base_url: str) -> None:
+        self._get_driver = get_driver
+        self._user_state = user_state
+        self._base_url = base_url
+
+    @property
+    def _driver(self):
+        return self._get_driver()
+
+    def open(self, event) -> None:
         context = event.context or {}
         key = context.get("key", "")
         pod_key = context.get("pod_key", "")
@@ -138,18 +157,14 @@ class DialogHandler:
         )
         self._driver.respond_to_web(event, {})
 
-    def submit_env_set(self, event) -> None:
+    def submit(self, event) -> None:
         body = event.body
-        state = json.loads(body.get("state") or "{}")
+        state, ctx = _parse_submit(body)
         key = state.get("key", "")
-        pod_key = state.get("pod_key", "")
-        root_id = state.get("root_id", "")
-        prompt_post_id = state.get("prompt_post_id", "")
-        channel_id = body.get("channel_id", "")
 
         if body.get("cancelled"):
-            if prompt_post_id:
-                patch_props(self._driver, prompt_post_id, f"❌ Ввод `{key}` отменён.")
+            if ctx.prompt_post_id:
+                patch_props(self._driver, ctx.prompt_post_id, f"❌ Ввод `{key}` отменён.")
             self._driver.respond_to_web(event, {})
             return
 
@@ -161,19 +176,30 @@ class DialogHandler:
             return
 
         try:
-            self._user_state.set_user_env(pod_key, key, value)
+            self._user_state.set_user_env(ctx.pod_key, key, value)
             result = f"✅ `{key}` сохранён. Сессия будет перезапущена автоматически."
         except Exception:
-            logger.exception("env_set_failed key=%s", key, extra={"mm_user_id": pod_key})
+            logger.exception("env_set_failed key=%s", key, extra={"mm_user_id": ctx.pod_key})
             result = f"❌ Ошибка при сохранении `{key}`."
 
-        if prompt_post_id:
-            patch_props(self._driver, prompt_post_id, result)
+        if ctx.prompt_post_id:
+            patch_props(self._driver, ctx.prompt_post_id, result)
         else:
-            self._driver.create_post(channel_id=channel_id, message=result, root_id=root_id)
+            self._driver.create_post(channel_id=ctx.channel_id, message=result, root_id=ctx.root_id)
         self._driver.respond_to_web(event, {})
 
-    def open_skill_create_dialog(self, event) -> None:
+
+class SkillDialogHandler:
+    def __init__(self, get_driver: Callable, skill_manager: SkillManager, base_url: str) -> None:
+        self._get_driver = get_driver
+        self._skill_manager = skill_manager
+        self._base_url = base_url
+
+    @property
+    def _driver(self):
+        return self._get_driver()
+
+    def open(self, event) -> None:
         context = event.context or {}
         name = context.get("name", "")
         pod_key = context.get("pod_key", "")
@@ -208,18 +234,16 @@ class DialogHandler:
         )
         self._driver.respond_to_web(event, {})
 
-    def submit_skill_create(self, event) -> None:
+    def submit(self, event) -> None:
         body = event.body
-        state = json.loads(body.get("state") or "{}")
+        state, ctx = _parse_submit(body)
         name = state.get("name", "")
-        pod_key = state.get("pod_key", "")
-        root_id = state.get("root_id", "")
-        prompt_post_id = state.get("prompt_post_id", "")
-        channel_id = body.get("channel_id", "")
 
         if body.get("cancelled"):
-            if prompt_post_id:
-                patch_props(self._driver, prompt_post_id, f"❌ Создание навыка `{name}` отменено.")
+            if ctx.prompt_post_id:
+                patch_props(
+                    self._driver, ctx.prompt_post_id, f"❌ Создание навыка `{name}` отменено."
+                )
             self._driver.respond_to_web(event, {})
             return
 
@@ -231,16 +255,16 @@ class DialogHandler:
             return
 
         try:
-            self._skill_manager.create_skill(pod_key, name, content)
+            self._skill_manager.create_skill(ctx.pod_key, name, content)
             result = f"✅ Навык `{name}` создан."
         except PodNotRunningError:
             result = "Сессия не запущена. Запустите сессию, отправив любое сообщение."
         except SkillError:
-            logger.exception("skill_create_failed name=%s", name, extra={"mm_user_id": pod_key})
+            logger.exception("skill_create_failed name=%s", name, extra={"mm_user_id": ctx.pod_key})
             result = f"❌ Ошибка при создании навыка `{name}`."
 
-        if prompt_post_id:
-            patch_props(self._driver, prompt_post_id, result)
+        if ctx.prompt_post_id:
+            patch_props(self._driver, ctx.prompt_post_id, result)
         else:
-            self._driver.create_post(channel_id=channel_id, message=result, root_id=root_id)
+            self._driver.create_post(channel_id=ctx.channel_id, message=result, root_id=ctx.root_id)
         self._driver.respond_to_web(event, {})
