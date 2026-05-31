@@ -8,13 +8,22 @@ from mmpy_bot.wrappers import ActionEvent, Message
 
 from app import metrics
 from app.bot.approval import ApprovalDecision, ApprovalManager
-from app.bot.commands import CommandHandler, _SessionState
+from app.bot.commands import (
+    CommandHandler,
+    EnvCommandHandler,
+    ModelCommandHandler,
+    SessionCommandHandler,
+    SkillCommandHandler,
+    WorkspaceFileCommandHandler,
+    _SessionState,
+)
 from app.bot.dialogs import DialogHandler
 from app.bot.formatting import _CURSOR, patch_post
 from app.bot.stream_handler import StreamHandler
 from app.config import Settings
 from app.identity import object_name, session_id
 from app.k8s.lifecycle import LifecycleManager
+from app.k8s.skills import SkillManager
 from app.k8s.user_state import UserStateManager
 from app.zeroclaw.client import chat_stream
 
@@ -27,6 +36,7 @@ class ZeroClawPlugin(Plugin):
         settings: Settings,
         lifecycle: LifecycleManager,
         user_state: UserStateManager,
+        skill_manager: SkillManager,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -39,15 +49,35 @@ class ZeroClawPlugin(Plugin):
         self._approval = ApprovalManager(get_driver=lambda: self.driver, base_url=self._base_url)
         self._commands = CommandHandler(
             get_driver=lambda: self.driver,
-            lifecycle=lifecycle,
-            user_state=user_state,
-            base_url=self._base_url,
-            allowed_models=settings.allowed_models,
-            sessions=self._sessions,
+            session=SessionCommandHandler(
+                get_driver=lambda: self.driver,
+                sessions=self._sessions,
+            ),
+            env=EnvCommandHandler(
+                get_driver=lambda: self.driver,
+                base_url=self._base_url,
+                user_state=user_state,
+            ),
+            model=ModelCommandHandler(
+                get_driver=lambda: self.driver,
+                user_state=user_state,
+                allowed_models=settings.allowed_models,
+            ),
+            workspace=WorkspaceFileCommandHandler(
+                get_driver=lambda: self.driver,
+                base_url=self._base_url,
+                user_state=user_state,
+            ),
+            skill=SkillCommandHandler(
+                get_driver=lambda: self.driver,
+                base_url=self._base_url,
+                skill_manager=skill_manager,
+            ),
         )
         self._dialogs = DialogHandler(
             get_driver=lambda: self.driver,
             user_state=user_state,
+            skill_manager=skill_manager,
             base_url=self._base_url,
         )
 
@@ -92,6 +122,14 @@ class ZeroClawPlugin(Plugin):
     @listen_webhook("env_set_submit")
     def handle_env_set_submit(self, event: ActionEvent) -> None:
         self._dialogs.submit_env_set(event)
+
+    @listen_webhook("skill_create_dialog")
+    def handle_skill_create_dialog(self, event: ActionEvent) -> None:
+        self._dialogs.open_skill_create_dialog(event)
+
+    @listen_webhook("skill_create_submit")
+    def handle_skill_create_submit(self, event: ActionEvent) -> None:
+        self._dialogs.submit_skill_create(event)
 
     # ── streaming ──────────────────────────────────────────────────────────────
 

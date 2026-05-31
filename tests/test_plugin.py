@@ -27,7 +27,13 @@ def _make_plugin(is_ready=True):
     lifecycle.ensure_all.return_value = "zc-abc.ns.svc.cluster.local"
     lifecycle.is_ready.return_value = is_ready
     user_state = MagicMock()
-    plugin = ZeroClawPlugin(settings=settings, lifecycle=lifecycle, user_state=user_state)
+    skill_manager = MagicMock()
+    plugin = ZeroClawPlugin(
+        settings=settings,
+        lifecycle=lifecycle,
+        user_state=user_state,
+        skill_manager=skill_manager,
+    )
     plugin.driver = MagicMock()
     plugin.driver.client.userid = "bot-id"
     plugin.driver.user_id = "bot-id"
@@ -559,3 +565,230 @@ class TestChannelHandling:
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_dm(msg)
         lifecycle.ensure_all.assert_called_once_with("user1", model_user_id="user1")
+
+
+class TestSkillCommand:
+    def test_list_calls_skill_manager_and_returns_output(self):
+        plugin, _, _ = _make_plugin()
+        sm = plugin._commands._skill._skill_manager
+        sm.list_skills.return_value = "git-assistant v0.2.0 — Smart git ops"
+        msg = _make_message(text="!skill list")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        sm.list_skills.assert_called_once_with("user1")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "git-assistant" in reply
+
+    def test_list_empty_shows_no_skills_message(self):
+        plugin, _, _ = _make_plugin()
+        plugin._commands._skill._skill_manager.list_skills.return_value = ""
+        msg = _make_message(text="!skill list")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "Навыков не установлено" in reply
+
+    def test_list_pod_not_running_shows_error(self):
+        plugin, _, _ = _make_plugin()
+        from app.k8s.skills import PodNotRunningError
+
+        plugin._commands._skill._skill_manager.list_skills.side_effect = PodNotRunningError(
+            "no pod"
+        )
+        msg = _make_message(text="!skill list")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "не запущена" in reply
+
+    def test_create_valid_name_posts_dialog_button(self):
+        plugin, lifecycle, _ = _make_plugin()
+        msg = _make_message(text="!skill create my-skill")
+        with patch("app.bot.plugin.chat_stream") as mock_stream:
+            plugin.handle_dm(msg)
+        mock_stream.assert_not_called()
+        lifecycle.ensure_all.assert_not_called()
+        plugin.driver.posts.create_post.assert_called_once()
+        options = plugin.driver.posts.create_post.call_args[1]["options"]
+        context = options["props"]["attachments"][0]["actions"][0]["integration"]["context"]
+        assert context["name"] == "my-skill"
+        assert context["pod_key"] == "user1"
+
+    def test_create_invalid_name_shows_error(self):
+        plugin, _, _ = _make_plugin()
+        msg = _make_message(text="!skill create ../bad")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "Некорректное" in reply
+
+    def test_create_no_name_shows_usage(self):
+        plugin, _, _ = _make_plugin()
+        msg = _make_message(text="!skill create")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "!skill list" in reply
+
+    def test_remove_existing_skill_shows_success(self):
+        plugin, _, _ = _make_plugin()
+        sm = plugin._commands._skill._skill_manager
+        sm.remove_skill.return_value = True
+        msg = _make_message(text="!skill remove my-skill")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        sm.remove_skill.assert_called_once_with("user1", "my-skill")
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "удалён" in reply
+
+    def test_remove_missing_skill_shows_not_found(self):
+        plugin, _, _ = _make_plugin()
+        plugin._commands._skill._skill_manager.remove_skill.return_value = False
+        msg = _make_message(text="!skill remove ghost")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "не найден" in reply
+
+    def test_remove_pod_not_running_shows_error(self):
+        plugin, _, _ = _make_plugin()
+        from app.k8s.skills import PodNotRunningError
+
+        plugin._commands._skill._skill_manager.remove_skill.side_effect = PodNotRunningError(
+            "no pod"
+        )
+        msg = _make_message(text="!skill remove my-skill")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "не запущена" in reply
+
+    def test_unknown_subcommand_shows_usage(self):
+        plugin, _, _ = _make_plugin()
+        msg = _make_message(text="!skill")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "!skill list" in reply
+        assert "!skill create" in reply
+        assert "!skill remove" in reply
+
+    def test_help_includes_skill_commands(self):
+        plugin, _, _ = _make_plugin()
+        msg = _make_message(text="!help")
+        with patch("app.bot.plugin.chat_stream"):
+            plugin.handle_dm(msg)
+        reply = plugin.driver.create_post.call_args[1]["message"]
+        assert "!skill" in reply
+
+
+class TestSkillCreateDialog:
+    def _make_event(
+        self,
+        name="my-skill",
+        user_id="user1",
+        root_id="",
+        channel_id="ch1",
+        content="# Skill",
+        cancelled=False,
+        prompt_post_id="",
+    ):
+        import json
+
+        event = MagicMock()
+        event.trigger_id = "trig-1"
+        event.post_id = prompt_post_id
+        event.context = {}
+        event.body = {
+            "channel_id": channel_id,
+            "cancelled": cancelled,
+            "state": json.dumps(
+                {
+                    "name": name,
+                    "pod_key": user_id,
+                    "root_id": root_id,
+                    "prompt_post_id": prompt_post_id,
+                }
+            ),
+            "submission": {"content": content} if not cancelled else {},
+        }
+        return event
+
+    def _make_dialog_handler(self):
+        from app.bot.dialogs import DialogHandler
+
+        driver = MagicMock()
+        skill_manager = MagicMock()
+        handler = DialogHandler(
+            get_driver=lambda: driver,
+            user_state=MagicMock(),
+            skill_manager=skill_manager,
+            base_url="http://localhost:8065",
+        )
+        return handler, driver, skill_manager
+
+    def test_submit_success_calls_create_skill(self):
+        handler, driver, sm = self._make_dialog_handler()
+        sm.create_skill.return_value = None
+        event = self._make_event(name="my-skill", user_id="user1", content="# My Skill")
+        handler.submit_skill_create(event)
+        sm.create_skill.assert_called_once_with("user1", "my-skill", "# My Skill")
+        driver.create_post.assert_called_once()
+        assert "создан" in driver.create_post.call_args[1]["message"]
+
+    def test_submit_cancel_does_not_call_create_skill(self):
+        handler, driver, sm = self._make_dialog_handler()
+        event = self._make_event(cancelled=True)
+        handler.submit_skill_create(event)
+        sm.create_skill.assert_not_called()
+        driver.respond_to_web.assert_called_once_with(event, {})
+
+    def test_submit_empty_content_returns_form_error(self):
+        handler, driver, sm = self._make_dialog_handler()
+        import json
+
+        event = MagicMock()
+        event.body = {
+            "channel_id": "ch1",
+            "cancelled": False,
+            "state": json.dumps(
+                {"name": "x", "pod_key": "u1", "root_id": "", "prompt_post_id": ""}
+            ),
+            "submission": {"content": ""},
+        }
+        handler.submit_skill_create(event)
+        sm.create_skill.assert_not_called()
+        driver.respond_to_web.assert_called_once()
+        response = driver.respond_to_web.call_args[0][1]
+        assert "errors" in response
+        assert "content" in response["errors"]
+
+    def test_submit_pod_not_running_posts_error(self):
+        handler, driver, sm = self._make_dialog_handler()
+        from app.k8s.skills import PodNotRunningError
+
+        sm.create_skill.side_effect = PodNotRunningError("no pod")
+        event = self._make_event(content="# Skill")
+        handler.submit_skill_create(event)
+        driver.create_post.assert_called_once()
+        assert "не запущена" in driver.create_post.call_args[1]["message"]
+
+    def test_submit_skill_error_posts_error(self):
+        handler, driver, sm = self._make_dialog_handler()
+        from app.k8s.skills import SkillError
+
+        sm.create_skill.side_effect = SkillError("install failed")
+        event = self._make_event(name="bad-skill", content="# Skill")
+        handler.submit_skill_create(event)
+        driver.create_post.assert_called_once()
+        assert "Ошибка" in driver.create_post.call_args[1]["message"]
+
+    def test_submit_with_prompt_post_id_uses_patch_props(self):
+        handler, driver, sm = self._make_dialog_handler()
+        sm.create_skill.return_value = None
+        event = self._make_event(content="# Skill", prompt_post_id="post-999")
+        handler.submit_skill_create(event)
+        sm.create_skill.assert_called_once()
+        # patch_props patches the original prompt post, not create_post
+        driver.create_post.assert_not_called()
+        driver.posts.patch_post.assert_called_once()
