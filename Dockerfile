@@ -1,10 +1,10 @@
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 RUN pip install uv
 WORKDIR /app
 COPY pyproject.toml ./
 RUN uv sync --frozen --no-dev 2>/dev/null || uv sync --no-dev
 
-FROM python:3.11-slim
+FROM python:3.14-slim
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY app/ ./app/
