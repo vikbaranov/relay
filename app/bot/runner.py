@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from mmpy_bot import Bot
@@ -76,5 +77,6 @@ def run_bot(settings: Settings) -> None:
 
     health.mark_ready()
 
+    asyncio.set_event_loop(asyncio.new_event_loop())
     bot = Bot(settings=bot_settings, plugins=[plugin], enable_logging=False)
     bot.run()
