@@ -175,7 +175,7 @@ class ZeroClawPlugin(Plugin):
                     break
             else:
                 handler.handle_stream_end(rkey)
-        except (RuntimeError, OSError):
+        except RuntimeError, OSError:
             metrics.messages_total.labels(outcome="error").inc()
             metrics.message_duration.labels(outcome="error").observe(time.monotonic() - t0)
             logger.exception("zeroclaw chat failed for %s", rkey, extra=extra)
