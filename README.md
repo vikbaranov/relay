@@ -16,6 +16,7 @@ A Kubernetes-native controller that connects Mattermost chat to [ZeroClaw](https
   - [Idle Reaper](#idle-reaper)
   - [User Environment Variables](#user-environment-variables)
   - [Workspace Files (SOUL & IDENTITY)](#workspace-files-soul--identity)
+- [Autonomy Level](#autonomy-level)
 - [Configuration](#configuration)
 - [Local Setup](#local-setup)
   - [Pre-commit hooks](#pre-commit-hooks)
@@ -84,6 +85,7 @@ app/
     lifecycle.py       # LifecycleManager — ensure/scale per-user K8s resources
     user_state.py      # UserStateManager — env secrets + workspace file CRUD
     reaper.py          # IdleReaper daemon thread
+    workspace.py       # workspace file defaults loader (SOUL.md, IDENTITY.md)
   workspace/
     SOUL.md            # Global default SOUL.md injected into every pod
     IDENTITY.md        # Global default IDENTITY.md injected into every pod
@@ -111,7 +113,7 @@ tests/
 ## Request Flow
 
 1. User posts a message in Mattermost.
-2. `ZeroClawPlugin.handle_message()` checks for bot commands (`!new`, `!clear`, `!stop`, `!env`, `!soul`, `!identity`, `!help`). If none match, it proceeds.
+2. `ZeroClawPlugin.handle_message()` checks for bot commands (`!new`, `!clear`, `!stop`, `!env`, `!soul`, `!identity`, `!autonomy`, `!help`). If none match, it proceeds.
 3. `RuntimeManager.ensure_runtime(mm_user_id)` creates (or re-enables) the user's Deployment, Service, and PVC.
 4. If the pod is not yet ready, a placeholder post is created ("Preparing session…") and `wait_ready()` polls the pod's `/health` endpoint until 200 or timeout. If the pod is already warm, a cursor post (`▌`) is created immediately.
 5. `_run_stream()` derives a session ID from the conversation scope and generation counter, opens a WebSocket to `ws://{service-dns}:{port}/ws/chat?session_id={sid}`, and starts streaming.
@@ -236,6 +238,20 @@ Commands:
 - `!soul show` / `!identity show` — display the current file (or confirm the global default is in use).
 - `!soul set` / `!identity set` — opens a Mattermost interactive dialog with a textarea pre-filled with the current content.
 - `!soul reset` / `!identity reset` — reverts the file to the global default.
+
+### Autonomy Level
+
+Each user can control whether ZeroClaw requires approval before executing potentially dangerous tools. The level is stored in the per-user identity ConfigMap and written into the ZeroClaw `config.toml` on every pod start.
+
+| Level | Behaviour |
+|---|---|
+| `supervised` (default) | ZeroClaw sends an `approval_request` frame before sensitive tool calls |
+| `full` | ZeroClaw runs tools without pausing for approval |
+
+Commands:
+- `!autonomy show` — display the current autonomy level.
+- `!autonomy set full` / `!autonomy set supervised` — change the level (takes effect on the next message).
+- `!autonomy reset` — revert to the default (`supervised`).
 
 ---
 

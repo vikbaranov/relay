@@ -1,5 +1,4 @@
 import logging
-import pathlib
 import threading
 import time
 import urllib.request
@@ -17,31 +16,14 @@ from app.identity import (
     pvc_name,
     zeroclaw_config_secret_name,
 )
+from app.k8s.user_state import UserStateManager
+from app.k8s.workspace import WORKSPACE_FILES, _workspace_default_data
 
 logger = logging.getLogger(__name__)
-
-_WORKSPACE_DEFAULTS = pathlib.Path(__file__).parent.parent / "workspace"
-WORKSPACE_FILES = ("SOUL.md", "IDENTITY.md")
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _workspace_default(filename: str) -> str | None:
-    path = _WORKSPACE_DEFAULTS / filename
-    if path.exists():
-        return path.read_text()
-    return None
-
-
-def _workspace_default_data() -> dict[str, str]:
-    data: dict[str, str] = {}
-    for filename in WORKSPACE_FILES:
-        content = _workspace_default(filename)
-        if content is not None:
-            data[filename] = content
-    return data
 
 
 class LifecycleManager:
@@ -61,6 +43,10 @@ class LifecycleManager:
         self._configmap_ensured = False
         self._provider_secret_ensured = False
         self._ensure_lock = threading.Lock()
+        self._user_state: UserStateManager | None = None
+
+    def set_user_state(self, user_state: UserStateManager) -> None:
+        self._user_state = user_state
 
     def ensure_all(self, mm_user_id: str, *, model_user_id: str | None = None) -> str:
         """Create or wake up per-user K8s resources. Returns internal service DNS."""
@@ -91,7 +77,7 @@ class LifecycleManager:
             self._apps.patch_namespaced_deployment(name, self._ns, {"spec": {"replicas": 0}})
             logger.info(
                 "scaled down idle runtime",
-                extra={"runtime_key": name, "namespace": self._ns},
+                extra={"runtime_key": name},
             )
         except Exception:
             metrics.k8s_errors_total.labels(op=metrics.K8S_OP_SCALE_DOWN).inc()
@@ -99,16 +85,18 @@ class LifecycleManager:
                 "failed to scale down %s",
                 name,
                 exc_info=True,
-                extra={"runtime_key": name, "namespace": self._ns},
+                extra={"runtime_key": name},
             )
 
     def restart_if_running(self, mm_user_id: str, *, model_user_id: str | None = None) -> None:
+        assert self._user_state is not None
         name = object_name(self._secret, mm_user_id)
         env_keys = self._get_user_env_keys(mm_user_id)
-        model = self._get_user_model(model_user_id or mm_user_id)
+        model = self._user_state.get_user_model(model_user_id or mm_user_id)
+        autonomy = self._user_state.get_user_autonomy(mm_user_id)
         s = self._settings
         cname = zeroclaw_config_secret_name(self._secret, mm_user_id)
-        config_toml = self._zeroclaw_config_toml(env_keys, model)
+        config_toml = self._zeroclaw_config_toml(env_keys, model, autonomy)
         try:
             self._core.patch_namespaced_secret(
                 cname,
@@ -122,7 +110,7 @@ class LifecycleManager:
                     "failed to update user zeroclaw config %s",
                     cname,
                     exc_info=True,
-                    extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+                    extra={"runtime_key": name, "mm_user_id": mm_user_id},
                 )
                 raise
         now = _now_iso()
@@ -146,7 +134,7 @@ class LifecycleManager:
                 "failed to restart deployment %s",
                 name,
                 exc_info=True,
-                extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+                extra={"runtime_key": name, "mm_user_id": mm_user_id},
             )
             raise
 
@@ -171,13 +159,24 @@ class LifecycleManager:
                 logger.info("created ConfigMap %s", s.zeroclaw_configmap)
             self._configmap_ensured = True
 
-    def _zeroclaw_config_toml(self, env_keys: list[str], model: str | None = None) -> str:
+    def _zeroclaw_config_toml(
+        self, env_keys: list[str], model: str | None = None, autonomy: str = "full"
+    ) -> str:  # default kept as literal; only used by _ensure_provider_credentials_secret (no user)
         s = self._settings
         effective_model = model or s.default_model
         doc: dict = {
             "gateway": {"allow_public_bind": True},
+            "observability": {
+                "backend": "log",
+                "log_persistence": "full",
+                "log_persistence_path": "/zeroclaw-data/workspace/state/runtime-trace.jsonl",
+                "log_tool_io": "full",
+            },
+            "scheduler": {"enabled": False},
+            "browser": {"enabled": False},
+            "cron": {"enabled": False, "catch_up_on_startup": False},
             "autonomy": {
-                "level": "full",
+                "level": autonomy,
                 "max_actions_per_hour": 100000,
                 "shell_env_passthrough": env_keys,
                 "allowed_commands": s.allowed_commands,
@@ -244,20 +243,6 @@ class LifecycleManager:
                 return []
             raise
 
-    def _get_user_model(self, mm_user_id: str) -> str:
-        s = self._settings
-        name = identity_configmap_name(self._secret, mm_user_id)
-        try:
-            cm = self._core.read_namespaced_config_map(name, self._ns)
-        except client.exceptions.ApiException as exc:
-            if exc.status == 404:
-                return s.default_model
-            raise
-        model = (cm.data or {}).get("MODEL")
-        if model in s.allowed_models:
-            return model
-        return s.default_model
-
     def _ensure_user_zeroclaw_config(
         self,
         mm_user_id: str,
@@ -267,9 +252,11 @@ class LifecycleManager:
         *,
         model_user_id: str | None = None,
     ) -> None:
+        assert self._user_state is not None
         s = self._settings
         name = zeroclaw_config_secret_name(self._secret, mm_user_id)
-        model = self._get_user_model(model_user_id or mm_user_id)
+        model = self._user_state.get_user_model(model_user_id or mm_user_id)
+        autonomy = self._user_state.get_user_autonomy(mm_user_id)
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(
                 name=name,
@@ -277,7 +264,9 @@ class LifecycleManager:
                 labels=labels,
                 annotations=annotations,
             ),
-            string_data={s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys, model)},
+            string_data={
+                s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys, model, autonomy)
+            },
         )
         try:
             self._core.read_namespaced_secret(name, self._ns)
@@ -289,7 +278,7 @@ class LifecycleManager:
             logger.info(
                 "created user zeroclaw config Secret %s",
                 name,
-                extra={"namespace": self._ns, "mm_user_id": mm_user_id},
+                extra={"mm_user_id": mm_user_id},
             )
 
     def _ensure_identity_configmap(self, mm_user_id: str, labels: dict, annotations: dict) -> None:
@@ -326,7 +315,7 @@ class LifecycleManager:
         logger.info(
             "created identity ConfigMap %s",
             name,
-            extra={"namespace": self._ns, "mm_user_id": mm_user_id},
+            extra={"mm_user_id": mm_user_id},
         )
 
     def _ensure_pvc(self, name: str, labels: dict, annotations: dict) -> None:
@@ -353,7 +342,7 @@ class LifecycleManager:
                 spec=spec,
             ),
         )
-        logger.info("created PVC %s", name, extra={"runtime_key": name, "namespace": self._ns})
+        logger.info("created PVC %s", name, extra={"runtime_key": name})
 
     def _ensure_service(self, name: str, labels: dict, annotations: dict) -> None:
         try:
@@ -382,7 +371,7 @@ class LifecycleManager:
                 ),
             ),
         )
-        logger.info("created Service %s", name, extra={"runtime_key": name, "namespace": self._ns})
+        logger.info("created Service %s", name, extra={"runtime_key": name})
 
     def _ensure_deployment(
         self, name: str, pvc: str, mm_user_id: str, labels: dict, annotations: dict
@@ -405,7 +394,7 @@ class LifecycleManager:
                 logger.info(
                     "scaled up idle runtime %s",
                     name,
-                    extra={"runtime_key": name, "namespace": self._ns},
+                    extra={"runtime_key": name},
                 )
             return
         except client.exceptions.ApiException as exc:
@@ -513,7 +502,7 @@ class LifecycleManager:
         logger.info(
             "created Deployment %s",
             name,
-            extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+            extra={"runtime_key": name, "mm_user_id": mm_user_id},
         )
 
     def _ensure_deployment_config_volume(self, name: str, deploy, mm_user_id: str) -> None:
@@ -576,7 +565,6 @@ class LifecycleManager:
                             "pod_ready service_dns=%s elapsed=%.1fs",
                             service_dns,
                             elapsed,
-                            extra={"namespace": self._ns},
                         )
                         return
             except Exception:
@@ -602,7 +590,7 @@ class LifecycleManager:
                 "failed to update last-activity for %s",
                 name,
                 exc_info=True,
-                extra={"runtime_key": name, "namespace": self._ns, "mm_user_id": mm_user_id},
+                extra={"runtime_key": name, "mm_user_id": mm_user_id},
             )
 
     def list_idle(self, ttl_seconds: int) -> list[str]:
@@ -619,7 +607,6 @@ class LifecycleManager:
             logger.error(
                 "failed to list deployments for idle check",
                 exc_info=True,
-                extra={"namespace": self._ns},
             )
             return idle
 

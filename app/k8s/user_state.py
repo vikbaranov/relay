@@ -5,11 +5,14 @@ from kubernetes import client
 
 from app import metrics
 from app.identity import env_secret_name, identity_configmap_name
-from app.k8s.lifecycle import _workspace_default, _workspace_default_data
+from app.k8s.workspace import _workspace_default, _workspace_default_data
 
 logger = logging.getLogger(__name__)
 
 MODEL_KEY = "MODEL"
+AUTONOMY_KEY = "AUTONOMY"
+_AUTONOMY_LEVELS = ("full", "supervised")
+DEFAULT_AUTONOMY = "supervised"
 
 
 class UserStateManager:
@@ -32,6 +35,10 @@ class UserStateManager:
     @property
     def default_model(self) -> str:
         return self._allowed_models[0]
+
+    @property
+    def default_autonomy(self) -> str:
+        return DEFAULT_AUTONOMY
 
     def get_user_model(self, mm_user_id: str) -> str:
         name = identity_configmap_name(self._secret, mm_user_id)
@@ -82,6 +89,56 @@ class UserStateManager:
                 return False
             metrics.k8s_errors_total.labels(op=metrics.K8S_OP_WORKSPACE_FILE_RESET).inc()
             raise
+
+    def get_user_autonomy(self, mm_user_id: str) -> str:
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return DEFAULT_AUTONOMY
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_AUTONOMY_GET).inc()
+            raise
+        level = (cm.data or {}).get(AUTONOMY_KEY)
+        if level in _AUTONOMY_LEVELS:
+            return level
+        return DEFAULT_AUTONOMY
+
+    def set_user_autonomy(self, mm_user_id: str, level: str) -> bool:
+        if level not in _AUTONOMY_LEVELS:
+            return False
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            self._core.patch_namespaced_config_map(name, self._ns, {"data": {AUTONOMY_KEY: level}})
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                metrics.k8s_errors_total.labels(op=metrics.K8S_OP_AUTONOMY_SET).inc()
+                raise
+            self._core.create_namespaced_config_map(
+                self._ns,
+                client.V1ConfigMap(
+                    metadata=client.V1ObjectMeta(name=name, namespace=self._ns),
+                    data={**_workspace_default_data(), AUTONOMY_KEY: level},
+                ),
+            )
+        self._restart(mm_user_id)
+        return True
+
+    def reset_user_autonomy(self, mm_user_id: str) -> bool:
+        name = identity_configmap_name(self._secret, mm_user_id)
+        try:
+            cm = self._core.read_namespaced_config_map(name, self._ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return False
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_AUTONOMY_RESET).inc()
+            raise
+        data = cm.data or {}
+        if AUTONOMY_KEY not in data:
+            return False
+        self._core.patch_namespaced_config_map(name, self._ns, {"data": {AUTONOMY_KEY: None}})
+        self._restart(mm_user_id)
+        return True
 
     def set_user_env(self, mm_user_id: str, key: str, value: str) -> None:
         sname = env_secret_name(self._secret, mm_user_id)

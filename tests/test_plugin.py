@@ -4,7 +4,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from app.bot.plugin import ZeroClawPlugin, _SessionState
+from app.bot.commands import SessionState
+from app.bot.plugin import ZeroClawPlugin
 from app.config import Settings
 
 
@@ -170,7 +171,7 @@ class TestHandleMessage:
         msg = _make_message(text="!stop")
         scope = plugin._session_scope(msg)
         stop_event = threading.Event()
-        plugin._sessions[scope] = _SessionState(stop_event=stop_event)
+        plugin._sessions[scope] = SessionState(stop_event=stop_event)
         plugin.handle_dm(msg)
         assert stop_event.is_set()
         lifecycle.ensure_all.assert_not_called()

@@ -11,26 +11,36 @@ from app.k8s.user_state import UserStateManager
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class _SessionState:
-    stop_event: threading.Event | None = None
-    generation: int = 0
-
-
-class SessionCommandHandler:
-    def __init__(self, get_driver: Callable, sessions: dict[str, _SessionState]) -> None:
-        self._get_driver = get_driver
-        self._sessions = sessions
+class _DriverMixin:
+    _get_driver: Callable
 
     @property
     def _driver(self):
         return self._get_driver()
 
+
+@dataclass
+class SessionState:
+    stop_event: threading.Event | None = None
+    generation: int = 0
+
+
+class SessionCommandHandler(_DriverMixin):
+    USAGE = (
+        "- `!new` — начать новый контекст разговора\n"
+        "- `!clear` — очистить контекст (аналог `!new`)\n"
+        "- `!stop` — остановить текущее выполнение"
+    )
+
+    def __init__(self, get_driver: Callable, sessions: dict[str, SessionState]) -> None:
+        self._get_driver = get_driver
+        self._sessions = sessions
+
     def handle(self, message: Message, scope: str, root_id: str) -> bool:
         command = message.text.strip().split(maxsplit=1)[0].lower()
 
         if command in ("!new", "!clear"):
-            self._sessions.setdefault(scope, _SessionState()).generation += 1
+            self._sessions.setdefault(scope, SessionState()).generation += 1
             msg = (
                 "Контекст очищен."
                 if command == "!clear"
@@ -59,7 +69,13 @@ class SessionCommandHandler:
         return False
 
 
-class EnvCommandHandler:
+class EnvCommandHandler(_DriverMixin):
+    USAGE = (
+        "- `!env set KEY` — сохранить переменную\n"
+        "- `!env list` — список переменных\n"
+        "- `!env del KEY` — удалить переменную"
+    )
+
     def __init__(
         self,
         get_driver: Callable,
@@ -69,10 +85,6 @@ class EnvCommandHandler:
         self._get_driver = get_driver
         self._base_url = base_url
         self._user_state = user_state
-
-    @property
-    def _driver(self):
-        return self._get_driver()
 
     def handle(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
         pod_key = runtime_key or message.user_id
@@ -149,17 +161,19 @@ class EnvCommandHandler:
 
         self._driver.create_post(
             channel_id=message.channel_id,
-            message=(
-                "Использование:\n"
-                "- `!env set KEY` — сохранить переменную через защищённый диалог\n"
-                "- `!env list` — список переменных\n"
-                "- `!env del KEY` — удалить переменную"
-            ),
+            message=f"Использование:\n{EnvCommandHandler.USAGE}",
             root_id=root_id,
         )
 
 
-class ModelCommandHandler:
+class ModelCommandHandler(_DriverMixin):
+    USAGE = (
+        "- `!model list` — список доступных моделей\n"
+        "- `!model show` — показать текущую модель\n"
+        "- `!model set MODEL` — выбрать модель\n"
+        "- `!model reset` — сбросить модель к умолчанию"
+    )
+
     def __init__(
         self,
         get_driver: Callable,
@@ -169,10 +183,6 @@ class ModelCommandHandler:
         self._get_driver = get_driver
         self._user_state = user_state
         self._allowed_models = allowed_models
-
-    @property
-    def _driver(self):
-        return self._get_driver()
 
     def handle(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
         pod_key = runtime_key or message.user_id
@@ -235,18 +245,12 @@ class ModelCommandHandler:
 
         self._driver.create_post(
             channel_id=message.channel_id,
-            message=(
-                "Использование:\n"
-                "- `!model list` — список доступных моделей\n"
-                "- `!model show` — показать текущую модель\n"
-                "- `!model set MODEL` — выбрать модель\n"
-                "- `!model reset` — сбросить модель к умолчанию"
-            ),
+            message=f"Использование:\n{ModelCommandHandler.USAGE}",
             root_id=root_id,
         )
 
 
-class WorkspaceFileCommandHandler:
+class WorkspaceFileCommandHandler(_DriverMixin):
     def __init__(
         self,
         get_driver: Callable,
@@ -257,9 +261,14 @@ class WorkspaceFileCommandHandler:
         self._base_url = base_url
         self._user_state = user_state
 
-    @property
-    def _driver(self):
-        return self._get_driver()
+    @staticmethod
+    def usage(cmd: str) -> str:
+        filename = f"{cmd.upper()}.md"
+        return (
+            f"- `!{cmd} show` — показать текущий {filename}\n"
+            f"- `!{cmd} set` — изменить {filename}\n"
+            f"- `!{cmd} reset` — сбросить {filename} к умолчанию"
+        )
 
     def handle(
         self, message: Message, root_id: str, filename: str, runtime_key: str | None = None
@@ -332,17 +341,19 @@ class WorkspaceFileCommandHandler:
 
         self._driver.create_post(
             channel_id=message.channel_id,
-            message=(
-                f"Использование:\n"
-                f"- `!{cmd} show` — показать текущее содержимое\n"
-                f"- `!{cmd} set` — открыть редактор\n"
-                f"- `!{cmd} reset` — сбросить к глобальному умолчанию"
-            ),
+            message=f"Использование:\n{WorkspaceFileCommandHandler.usage(cmd)}",
             root_id=root_id,
         )
 
 
-class SkillCommandHandler:
+class SkillCommandHandler(_DriverMixin):
+    USAGE = (
+        "- `!skill list` — список установленных навыков\n"
+        "- `!skill show <name>` — показать содержимое навыка\n"
+        "- `!skill create <name>` — создать новый навык\n"
+        "- `!skill remove <name>` — удалить навык"
+    )
+
     def __init__(
         self,
         get_driver: Callable,
@@ -352,10 +363,6 @@ class SkillCommandHandler:
         self._get_driver = get_driver
         self._base_url = base_url
         self._skill_manager = skill_manager
-
-    @property
-    def _driver(self):
-        return self._get_driver()
 
     def _reject_if_invalid_name(self, name: str, channel_id: str, root_id: str) -> bool:
         if SKILL_NAME_RE.match(name):
@@ -456,12 +463,114 @@ class SkillCommandHandler:
 
         self._driver.create_post(
             channel_id=message.channel_id,
+            message=f"Использование:\n{SkillCommandHandler.USAGE}",
+            root_id=root_id,
+        )
+
+
+class AutonomyCommandHandler(_DriverMixin):
+    def __init__(self, get_driver: Callable, user_state: UserStateManager) -> None:
+        self._get_driver = get_driver
+        self._user_state = user_state
+
+    @staticmethod
+    def usage(default: str) -> str:
+        return (
+            "- `!autonomy show` — показать текущий уровень автономности\n"
+            "- `!autonomy set full` — полная автономность (без подтверждения действия)\n"
+            "- `!autonomy set supervised` — supervised режим (с подтверждение действий)\n"
+            f"- `!autonomy reset` — сбросить к умолчанию (`{default}`)"
+        )
+
+    def handle(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
+        pod_key = runtime_key or message.user_id
+        parts = message.text.strip().split(maxsplit=2)
+        sub = parts[1].lower() if len(parts) > 1 else "show"
+        default = self._user_state.default_autonomy
+
+        if sub == "show":
+            try:
+                level = self._user_state.get_user_autonomy(pod_key)
+                reply = f"Текущий уровень автономности: `{level}`"
+            except Exception:
+                logger.exception("autonomy_show_failed", extra={"mm_user_id": pod_key})
+                reply = "Ошибка при получении уровня автономности."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "set" and len(parts) == 3:
+            level = parts[2].lower()
+            try:
+                saved = self._user_state.set_user_autonomy(pod_key, level)
+                if saved:
+                    reply = (
+                        f"✅ Уровень автономности `{level}` сохранён. Сессия будет перезапущена."
+                    )
+                else:
+                    reply = (
+                        f"Недопустимый уровень: `{level}`. Доступные уровни: `full`, `supervised`."
+                    )
+            except Exception:
+                logger.exception(
+                    "autonomy_set_failed level=%s", level, extra={"mm_user_id": pod_key}
+                )
+                reply = "Ошибка при сохранении уровня автономности."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "reset":
+            try:
+                changed = self._user_state.reset_user_autonomy(pod_key)
+                reply = (
+                    f"✅ Уровень автономности сброшен к `{default}`. Сессия будет перезапущена."
+                    if changed
+                    else f"Уровень автономности уже использует значение по умолчанию: `{default}`."
+                )
+            except Exception:
+                logger.exception("autonomy_reset_failed", extra={"mm_user_id": pod_key})
+                reply = "Ошибка при сбросе уровня автономности."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        self._driver.create_post(
+            channel_id=message.channel_id,
+            message=f"Использование:\n{AutonomyCommandHandler.usage(default)}",
+            root_id=root_id,
+        )
+
+
+class HelpCommandHandler(_DriverMixin):
+    def __init__(self, get_driver: Callable, user_state: UserStateManager) -> None:
+        self._get_driver = get_driver
+        self._user_state = user_state
+
+    def handle(self, message: Message, root_id: str) -> None:
+        default = self._user_state.default_autonomy
+        self._driver.create_post(
+            channel_id=message.channel_id,
             message=(
-                "Использование:\n"
-                "- `!skill list` — список установленных навыков\n"
-                "- `!skill show <name>` — показать содержимое навыка\n"
-                "- `!skill create <name>` — создать новый навык\n"
-                "- `!skill remove <name>` — удалить навык"
+                "**Доступные команды:**\n"
+                "\n"
+                "**Контекст**\n"
+                f"{SessionCommandHandler.USAGE}\n"
+                "\n"
+                "**Переменные**\n"
+                f"{EnvCommandHandler.USAGE}\n"
+                "\n"
+                "**Модель**\n"
+                f"{ModelCommandHandler.USAGE}\n"
+                "\n"
+                "**Soul / Identity**\n"
+                f"{WorkspaceFileCommandHandler.usage('soul')}\n"
+                f"{WorkspaceFileCommandHandler.usage('identity')}\n"
+                "\n"
+                "**Навыки**\n"
+                f"{SkillCommandHandler.USAGE}\n"
+                "\n"
+                "**Автономность**\n"
+                f"{AutonomyCommandHandler.usage(default)}\n"
+                "\n"
+                "- `!help` — показать эту справку"
             ),
             root_id=root_id,
         )
@@ -470,23 +579,21 @@ class SkillCommandHandler:
 class CommandHandler:
     def __init__(
         self,
-        get_driver: Callable,
+        help: HelpCommandHandler,
         session: SessionCommandHandler,
         env: EnvCommandHandler,
         model: ModelCommandHandler,
         workspace: WorkspaceFileCommandHandler,
         skill: SkillCommandHandler,
+        autonomy: AutonomyCommandHandler,
     ) -> None:
-        self._get_driver = get_driver
+        self._help = help
         self._session = session
         self._env = env
         self._model = model
         self._workspace = workspace
         self._skill = skill
-
-    @property
-    def _driver(self):
-        return self._get_driver()
+        self._autonomy = autonomy
 
     def handle(
         self, message: Message, scope: str, root_id: str, runtime_key: str | None = None
@@ -497,45 +604,7 @@ class CommandHandler:
             return True
 
         if command == "!help":
-            self._driver.create_post(
-                channel_id=message.channel_id,
-                message=(
-                    "**Доступные команды:**\n"
-                    "\n"
-                    "**Контекст**\n"
-                    "- `!new` — начать новый контекст разговора\n"
-                    "- `!clear` — очистить контекст (аналог `!new`)\n"
-                    "- `!stop` — остановить текущее выполнение\n"
-                    "\n"
-                    "**Переменные**\n"
-                    "- `!env set KEY` — сохранить переменную окружения\n"
-                    "- `!env list` — список переменных окружения\n"
-                    "- `!env del KEY` — удалить переменную окружения\n"
-                    "\n"
-                    "**Модель**\n"
-                    "- `!model list` — список доступных моделей\n"
-                    "- `!model show` — показать текущую модель\n"
-                    "- `!model set MODEL` — выбрать модель\n"
-                    "- `!model reset` — сбросить модель к умолчанию\n"
-                    "\n"
-                    "**Soul / Identity**\n"
-                    "- `!soul show` — показать текущий SOUL.md\n"
-                    "- `!soul set` — изменить SOUL.md\n"
-                    "- `!soul reset` — сбросить SOUL.md к умолчанию\n"
-                    "- `!identity show` — показать текущий IDENTITY.md\n"
-                    "- `!identity set` — изменить IDENTITY.md\n"
-                    "- `!identity reset` — сбросить IDENTITY.md к умолчанию\n"
-                    "\n"
-                    "**Навыки**\n"
-                    "- `!skill list` — список установленных навыков\n"
-                    "- `!skill show <name>` — показать содержимое навыка\n"
-                    "- `!skill create <name>` — создать новый навык\n"
-                    "- `!skill remove <name>` — удалить навык\n"
-                    "\n"
-                    "- `!help` — показать эту справку"
-                ),
-                root_id=root_id,
-            )
+            self._help.handle(message, root_id)
             return True
 
         if command == "!env":
@@ -556,6 +625,10 @@ class CommandHandler:
 
         if command == "!skill":
             self._skill.handle(message, root_id, runtime_key)
+            return True
+
+        if command == "!autonomy":
+            self._autonomy.handle(message, root_id, runtime_key)
             return True
 
         return False

@@ -9,15 +9,17 @@ from mmpy_bot.wrappers import ActionEvent, Message
 from app import metrics
 from app.bot.approval import ApprovalDecision, ApprovalManager
 from app.bot.commands import (
+    AutonomyCommandHandler,
     CommandHandler,
     EnvCommandHandler,
+    HelpCommandHandler,
     ModelCommandHandler,
     SessionCommandHandler,
+    SessionState,
     SkillCommandHandler,
     WorkspaceFileCommandHandler,
-    _SessionState,
 )
-from app.bot.dialogs import DialogHandler
+from app.bot.dialogs import EnvDialogHandler, SkillDialogHandler, WorkspaceDialogHandler
 from app.bot.formatting import _CURSOR, patch_post
 from app.bot.stream_handler import StreamHandler
 from app.config import Settings
@@ -42,13 +44,16 @@ class ZeroClawPlugin(Plugin):
         self._settings = settings
         self._lifecycle = lifecycle
         self._secret = settings.k8s_name_secret.encode()
-        self._sessions: dict[str, _SessionState] = {}
+        self._sessions: dict[str, SessionState] = {}
         self._base_url: str = (
             settings.webhook_public_url or f"http://localhost:{settings.webhook_host_port}"
         )
         self._approval = ApprovalManager(get_driver=lambda: self.driver, base_url=self._base_url)
         self._commands = CommandHandler(
-            get_driver=lambda: self.driver,
+            help=HelpCommandHandler(
+                get_driver=lambda: self.driver,
+                user_state=user_state,
+            ),
             session=SessionCommandHandler(
                 get_driver=lambda: self.driver,
                 sessions=self._sessions,
@@ -73,10 +78,23 @@ class ZeroClawPlugin(Plugin):
                 base_url=self._base_url,
                 skill_manager=skill_manager,
             ),
+            autonomy=AutonomyCommandHandler(
+                get_driver=lambda: self.driver,
+                user_state=user_state,
+            ),
         )
-        self._dialogs = DialogHandler(
+        self._workspace_dialog = WorkspaceDialogHandler(
             get_driver=lambda: self.driver,
             user_state=user_state,
+            base_url=self._base_url,
+        )
+        self._env_dialog = EnvDialogHandler(
+            get_driver=lambda: self.driver,
+            user_state=user_state,
+            base_url=self._base_url,
+        )
+        self._skill_dialog = SkillDialogHandler(
+            get_driver=lambda: self.driver,
             skill_manager=skill_manager,
             base_url=self._base_url,
         )
@@ -109,27 +127,27 @@ class ZeroClawPlugin(Plugin):
 
     @listen_webhook("workspace_file_dialog")
     def handle_workspace_file_dialog(self, event: ActionEvent) -> None:
-        self._dialogs.open_workspace_file_dialog(event)
+        self._workspace_dialog.open(event)
 
     @listen_webhook("workspace_file_submit")
     def handle_workspace_file_submit(self, event: ActionEvent) -> None:
-        self._dialogs.submit_workspace_file(event)
+        self._workspace_dialog.submit(event)
 
     @listen_webhook("env_set_dialog")
     def handle_env_set_dialog(self, event: ActionEvent) -> None:
-        self._dialogs.open_env_set_dialog(event)
+        self._env_dialog.open(event)
 
     @listen_webhook("env_set_submit")
     def handle_env_set_submit(self, event: ActionEvent) -> None:
-        self._dialogs.submit_env_set(event)
+        self._env_dialog.submit(event)
 
     @listen_webhook("skill_create_dialog")
     def handle_skill_create_dialog(self, event: ActionEvent) -> None:
-        self._dialogs.open_skill_create_dialog(event)
+        self._skill_dialog.open(event)
 
     @listen_webhook("skill_create_submit")
     def handle_skill_create_submit(self, event: ActionEvent) -> None:
-        self._dialogs.submit_skill_create(event)
+        self._skill_dialog.submit(event)
 
     # ── streaming ──────────────────────────────────────────────────────────────
 
@@ -145,7 +163,7 @@ class ZeroClawPlugin(Plugin):
         extra: dict,
         runtime_key: str,
     ) -> None:
-        state = self._sessions.setdefault(scope, _SessionState())
+        state = self._sessions.setdefault(scope, SessionState())
         sid = session_id(scope, state.generation)
         ws_url = f"ws://{service_dns}:{self._settings.zeroclaw_port}/ws/chat?session_id={sid}"
         extra["session_id"] = sid

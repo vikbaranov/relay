@@ -9,8 +9,9 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.identity import identity_configmap_name, object_name, zeroclaw_config_secret_name
-from app.k8s.lifecycle import LifecycleManager, _workspace_default
+from app.k8s.lifecycle import LifecycleManager
 from app.k8s.user_state import UserStateManager
+from app.k8s.workspace import _workspace_default
 
 
 def _settings(**overrides) -> Settings:
@@ -42,6 +43,7 @@ def _make_lifecycle_and_state(settings=None):
         restart_fn=lifecycle.restart_if_running,
         allowed_models=s.allowed_models,
     )
+    lifecycle.set_user_state(user_state)
     return lifecycle, user_state, core, apps
 
 
@@ -198,6 +200,15 @@ class TestEnsureRuntime:
         core = MagicMock()
         apps = MagicMock()
         lifecycle = LifecycleManager(settings=s, core=core, apps=apps, secret=b"s", ns="sandbox")
+        user_state = UserStateManager(
+            core=core,
+            apps=apps,
+            secret=b"s",
+            ns="sandbox",
+            restart_fn=lifecycle.restart_if_running,
+            allowed_models=s.allowed_models,
+        )
+        lifecycle.set_user_state(user_state)
         existing = MagicMock()
         existing.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing
@@ -418,6 +429,72 @@ class TestEnsureRuntime:
         identity_name = identity_configmap_name(b"test-secret", "user1")
         assert any(identity_name in c for c in read_calls)
 
+    def test_user_config_autonomy_defaults_to_full(self):
+        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        lifecycle.ensure_all("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'level = "full"' in config_toml
+
+    def test_user_config_uses_supervised_autonomy_override(self):
+        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        identity_cm = MagicMock()
+        identity_cm.data = {"AUTONOMY": "supervised"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        lifecycle.ensure_all("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'level = "supervised"' in config_toml
+
+    def test_user_config_ignores_invalid_autonomy_override(self):
+        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        identity_cm = MagicMock()
+        identity_cm.data = {"AUTONOMY": "invalid"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+        existing_deploy = MagicMock()
+        existing_deploy.spec.replicas = 1
+        apps.read_namespaced_deployment.return_value = existing_deploy
+
+        lifecycle.ensure_all("user1")
+
+        expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
+        all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
+        user_config = next(s for s in all_creates if s.metadata.name == expected_name)
+        config_toml = user_config.string_data["config.toml"]
+        assert 'level = "full"' in config_toml
+
+    def test_restart_updates_user_config_with_autonomy(self):
+        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        identity_cm = MagicMock()
+        identity_cm.data = {"AUTONOMY": "supervised"}
+        core.read_namespaced_config_map.return_value = identity_cm
+        env_secret = MagicMock()
+        env_secret.data = {}
+        core.read_namespaced_secret.return_value = env_secret
+
+        lifecycle.restart_if_running("user1")
+
+        patch_call = core.patch_namespaced_secret.call_args
+        config_toml = patch_call[0][2]["stringData"]["config.toml"]
+        assert 'level = "supervised"' in config_toml
+
     def test_deployment_mounts_identity_volume(self):
         lifecycle, _, core, apps = _make_lifecycle_and_state()
         core.read_namespaced_persistent_volume_claim.side_effect = (
@@ -637,4 +714,76 @@ class TestWorkspaceFiles:
         assert user_state.reset_user_model("user1") is True
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["MODEL"] is None
+        apps.patch_namespaced_deployment.assert_called_once()
+
+    def test_get_user_autonomy_returns_full_when_absent(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        cm = MagicMock()
+        cm.data = {}
+        core.read_namespaced_config_map.return_value = cm
+        assert user_state.get_user_autonomy("user1") == "full"
+
+    def test_get_user_autonomy_returns_full_when_configmap_missing(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
+        assert user_state.get_user_autonomy("user1") == "full"
+
+    def test_get_user_autonomy_returns_supervised_when_set(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        cm = MagicMock()
+        cm.data = {"AUTONOMY": "supervised"}
+        core.read_namespaced_config_map.return_value = cm
+        assert user_state.get_user_autonomy("user1") == "supervised"
+
+    def test_get_user_autonomy_returns_full_for_invalid_value(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        cm = MagicMock()
+        cm.data = {"AUTONOMY": "invalid"}
+        core.read_namespaced_config_map.return_value = cm
+        assert user_state.get_user_autonomy("user1") == "full"
+
+    def test_set_user_autonomy_rejects_unknown_level(self):
+        _, user_state, _, _ = _make_lifecycle_and_state()
+        assert user_state.set_user_autonomy("user1", "turbo") is False
+
+    def test_set_user_autonomy_patches_configmap_and_restarts(self):
+        _, user_state, core, apps = _make_lifecycle_and_state()
+        assert user_state.set_user_autonomy("user1", "supervised") is True
+        core.patch_namespaced_config_map.assert_called_once()
+        _, _, body = core.patch_namespaced_config_map.call_args[0]
+        assert body["data"]["AUTONOMY"] == "supervised"
+        apps.patch_namespaced_deployment.assert_called_once()
+
+    def test_set_user_autonomy_creates_configmap_when_absent(self):
+        _, user_state, core, apps = _make_lifecycle_and_state()
+        core.patch_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(
+            status=404
+        )
+        assert user_state.set_user_autonomy("user1", "supervised") is True
+        core.create_namespaced_config_map.assert_called_once()
+        cm_body = core.create_namespaced_config_map.call_args[0][1]
+        assert cm_body.data["AUTONOMY"] == "supervised"
+
+    def test_reset_user_autonomy_returns_false_when_absent(self):
+        _, user_state, core, apps = _make_lifecycle_and_state()
+        cm = MagicMock()
+        cm.data = {}
+        core.read_namespaced_config_map.return_value = cm
+        assert user_state.reset_user_autonomy("user1") is False
+        core.patch_namespaced_config_map.assert_not_called()
+        apps.patch_namespaced_deployment.assert_not_called()
+
+    def test_reset_user_autonomy_returns_false_when_configmap_missing(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
+        assert user_state.reset_user_autonomy("user1") is False
+
+    def test_reset_user_autonomy_removes_override_and_restarts(self):
+        _, user_state, core, apps = _make_lifecycle_and_state()
+        cm = MagicMock()
+        cm.data = {"AUTONOMY": "supervised"}
+        core.read_namespaced_config_map.return_value = cm
+        assert user_state.reset_user_autonomy("user1") is True
+        _, _, body = core.patch_namespaced_config_map.call_args[0]
+        assert body["data"]["AUTONOMY"] is None
         apps.patch_namespaced_deployment.assert_called_once()
