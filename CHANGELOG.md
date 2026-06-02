@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/vikbaranov/relay/compare/v0.7.1...v0.8.0) (2026-06-02)
+
+
+### Features
+
+* add autonomy level management ([#31](https://github.com/vikbaranov/relay/issues/31)) ([e07dc0b](https://github.com/vikbaranov/relay/commit/e07dc0b1d0cfd1ef089ba18c0ac7a92dc87a661c))
+
 ## [0.7.1](https://github.com/vikbaranov/relay/compare/v0.7.0...v0.7.1) (2026-05-30)
 
 
