@@ -16,6 +16,7 @@ from app.identity import (
     pvc_name,
     zeroclaw_config_secret_name,
 )
+from app.k8s.user_state import UserStateManager
 from app.k8s.workspace import WORKSPACE_FILES, _workspace_default_data
 
 logger = logging.getLogger(__name__)
@@ -42,9 +43,9 @@ class LifecycleManager:
         self._configmap_ensured = False
         self._provider_secret_ensured = False
         self._ensure_lock = threading.Lock()
-        self._user_state = None
+        self._user_state: UserStateManager | None = None
 
-    def set_user_state(self, user_state) -> None:
+    def set_user_state(self, user_state: UserStateManager) -> None:
         self._user_state = user_state
 
     def ensure_all(self, mm_user_id: str, *, model_user_id: str | None = None) -> str:
@@ -88,6 +89,7 @@ class LifecycleManager:
             )
 
     def restart_if_running(self, mm_user_id: str, *, model_user_id: str | None = None) -> None:
+        assert self._user_state is not None
         name = object_name(self._secret, mm_user_id)
         env_keys = self._get_user_env_keys(mm_user_id)
         model = self._user_state.get_user_model(model_user_id or mm_user_id)
@@ -250,6 +252,7 @@ class LifecycleManager:
         *,
         model_user_id: str | None = None,
     ) -> None:
+        assert self._user_state is not None
         s = self._settings
         name = zeroclaw_config_secret_name(self._secret, mm_user_id)
         model = self._user_state.get_user_model(model_user_id or mm_user_id)
