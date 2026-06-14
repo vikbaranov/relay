@@ -47,7 +47,6 @@ def _make_controller_and_state(settings=None):
         apps=apps,
         secret=secret,
         ns=ns,
-        restart_fn=lambda mm_user_id, **kw: None,
         allowed_models=s.allowed_models,
     )
     controller = RuntimeController(
@@ -75,7 +74,6 @@ def _make_lifecycle_and_state(settings=None):
         apps=apps,
         secret=secret,
         ns=ns,
-        restart_fn=lifecycle.restart_if_running,
         allowed_models=s.allowed_models,
     )
     lifecycle.set_user_state(user_state)
@@ -248,7 +246,6 @@ class TestEnsureRuntime:
             apps=apps,
             secret=b"s",
             ns="sandbox",
-            restart_fn=lambda mm_user_id, **kw: None,
             allowed_models=s.allowed_models,
         )
         controller = RuntimeController(
@@ -651,11 +648,6 @@ class TestWorkspaceFiles:
         assert cm_body.data["SOUL.md"] == "new soul"
         assert cm_body.data["IDENTITY.md"] == _workspace_default("IDENTITY.md")
 
-    def test_set_restarts_running_deployment(self):
-        _, user_state, core, apps = _make_lifecycle_and_state()
-        user_state.set_workspace_file("user1", "SOUL.md", "new soul")
-        apps.patch_namespaced_deployment.assert_called_once()
-
     def test_reset_returns_false_when_configmap_absent(self):
         _, user_state, core, _ = _make_lifecycle_and_state()
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
@@ -668,7 +660,7 @@ class TestWorkspaceFiles:
         core.read_namespaced_config_map.return_value = cm
         assert user_state.reset_workspace_file("user1", "SOUL.md") is False
 
-    def test_reset_patches_key_to_default_and_restarts(self):
+    def test_reset_patches_key_to_default(self):
         _, user_state, core, apps = _make_lifecycle_and_state()
         cm = MagicMock()
         cm.data = {"SOUL.md": "custom"}
@@ -676,7 +668,6 @@ class TestWorkspaceFiles:
         assert user_state.reset_workspace_file("user1", "SOUL.md") is True
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["SOUL.md"] == _workspace_default("SOUL.md")
-        apps.patch_namespaced_deployment.assert_called_once()
 
     def test_get_returns_none_for_default_content(self):
         _, user_state, core, _ = _make_lifecycle_and_state()
@@ -736,7 +727,7 @@ class TestWorkspaceFiles:
         )
         assert user_state.set_user_model("user1", "bad-model") is False
 
-    def test_set_user_model_patches_configmap_and_restarts(self):
+    def test_set_user_model_patches_configmap(self):
         _, user_state, core, apps = _make_lifecycle_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
@@ -744,7 +735,6 @@ class TestWorkspaceFiles:
         core.patch_namespaced_config_map.assert_called_once()
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["MODEL"] == "gpt-4o"
-        apps.patch_namespaced_deployment.assert_called_once()
 
     def test_reset_user_model_returns_false_when_absent(self):
         _, user_state, core, apps = _make_lifecycle_and_state(
@@ -757,7 +747,7 @@ class TestWorkspaceFiles:
         core.patch_namespaced_config_map.assert_not_called()
         apps.patch_namespaced_deployment.assert_not_called()
 
-    def test_reset_user_model_removes_override_and_restarts(self):
+    def test_reset_user_model_removes_override(self):
         _, user_state, core, apps = _make_lifecycle_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
@@ -767,7 +757,6 @@ class TestWorkspaceFiles:
         assert user_state.reset_user_model("user1") is True
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["MODEL"] is None
-        apps.patch_namespaced_deployment.assert_called_once()
 
     def test_get_user_autonomy_returns_full_when_absent(self):
         _, user_state, core, _ = _make_lifecycle_and_state()
@@ -799,13 +788,12 @@ class TestWorkspaceFiles:
         _, user_state, _, _ = _make_lifecycle_and_state()
         assert user_state.set_user_autonomy("user1", "turbo") is False
 
-    def test_set_user_autonomy_patches_configmap_and_restarts(self):
+    def test_set_user_autonomy_patches_configmap(self):
         _, user_state, core, apps = _make_lifecycle_and_state()
         assert user_state.set_user_autonomy("user1", "supervised") is True
         core.patch_namespaced_config_map.assert_called_once()
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["AUTONOMY"] == "supervised"
-        apps.patch_namespaced_deployment.assert_called_once()
 
     def test_set_user_autonomy_creates_configmap_when_absent(self):
         _, user_state, core, apps = _make_lifecycle_and_state()
@@ -831,7 +819,7 @@ class TestWorkspaceFiles:
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
         assert user_state.reset_user_autonomy("user1") is False
 
-    def test_reset_user_autonomy_removes_override_and_restarts(self):
+    def test_reset_user_autonomy_removes_override(self):
         _, user_state, core, apps = _make_lifecycle_and_state()
         cm = MagicMock()
         cm.data = {"AUTONOMY": "supervised"}
@@ -839,7 +827,6 @@ class TestWorkspaceFiles:
         assert user_state.reset_user_autonomy("user1") is True
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["AUTONOMY"] is None
-        apps.patch_namespaced_deployment.assert_called_once()
 
 
 class TestUserStateToken:
