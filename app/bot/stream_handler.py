@@ -32,8 +32,12 @@ class StreamHandler:
         self._stream_start = t
         self._pending_tool_start: dict[str, tuple[str, float]] = {}
         self._thinking = ""
+        self._tool_count = 0
+        self._tool_running = False
 
     def _patch_if_due(self, *, cursor: bool = False) -> None:
+        if self._tool_running:  # suppress intermediate edits while tool executes (#11)
+            return
         now = time.monotonic()
         if now - self._last_update >= _UPDATE_INTERVAL:
             self._patch(self.render(cursor=cursor))
@@ -76,8 +80,12 @@ class StreamHandler:
             tool_name = frame.get("name", "?")
             call_id = frame.get("id") or tool_name
             args = frame.get("args")
+            self._tool_count += 1
+            self._tool_running = True
             self._current_tool_key = _key_arg(tool_name, args)
-            self._current_tool = _fmt_tool_running(tool_name, self._current_tool_key)
+            self._current_tool = _fmt_tool_running(
+                tool_name, self._current_tool_key, self._tool_count
+            )
             metrics.tool_calls_total.labels(tool=tool_name).inc()
             self._pending_tool_start[call_id] = (tool_name, time.monotonic())
             logger.debug(
@@ -94,10 +102,10 @@ class StreamHandler:
             call_id = frame.get("id") or tool_name
             output = frame.get("output", "")
             pending = self._pending_tool_start.pop(call_id, None)
+            elapsed: float | None = None
             if pending is not None:
-                metrics.tool_call_duration_seconds.labels(tool=pending[0]).observe(
-                    time.monotonic() - pending[1]
-                )
+                elapsed = time.monotonic() - pending[1]
+                metrics.tool_call_duration_seconds.labels(tool=pending[0]).observe(elapsed)
             logger.debug(
                 "tool_result tool=%s output=%s call_id=%s",
                 tool_name,
@@ -105,7 +113,10 @@ class StreamHandler:
                 call_id,
                 extra=self._extra,
             )
-            self._tool_log.append(_fmt_tool_done(tool_name, self._current_tool_key, output))
+            self._tool_running = False
+            self._tool_log.append(
+                _fmt_tool_done(tool_name, self._current_tool_key, output, self._tool_count, elapsed)
+            )
             self._current_tool = ""
             self._current_tool_key = ""
             self._patch(self.render())

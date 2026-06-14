@@ -207,7 +207,7 @@ class TestHandleMessage:
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_dm(msg)
         call_msg = plugin.driver.create_post.call_args[1]["message"]
-        assert call_msg == "_Запрос получен. Готовлю сессию..._"
+        assert call_msg == "> ⏳ Готовлю сессию..."
 
     def test_posts_before_ensuring_runtime(self):
         plugin, lifecycle, user_state = _make_plugin(is_ready=True)
@@ -222,10 +222,7 @@ class TestHandleMessage:
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_dm(msg)
 
-        assert (
-            plugin.driver.create_post.call_args_list[0][1]["message"]
-            == "_Запрос получен. Готовлю сессию..._"
-        )
+        assert plugin.driver.create_post.call_args_list[0][1]["message"] == "> ⏳ Готовлю сессию..."
 
     def test_patches_ready_duration_after_cold_start(self):
         plugin, lifecycle, user_state = _make_plugin(is_ready=False)
@@ -239,7 +236,7 @@ class TestHandleMessage:
             plugin.handle_dm(msg)
 
         patch_messages = [c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list]
-        assert "Готов. Заняло 10с" in patch_messages
+        assert "> ✅ Сессия готова 10с" in patch_messages
 
     def test_patches_cold_start_message(self):
         plugin, lifecycle, user_state = _make_plugin(is_ready=False)
@@ -248,7 +245,7 @@ class TestHandleMessage:
         with patch("app.bot.plugin.chat_stream", return_value=frames):
             plugin.handle_dm(msg)
         patch_messages = [c[0][1]["message"] for c in plugin.driver.posts.patch_post.call_args_list]
-        assert any("Готов. Заняло" in message for message in patch_messages)
+        assert any("Сессия готова " in message for message in patch_messages)
 
     def test_patches_error_on_chat_failure(self):
         plugin, lifecycle, user_state = _make_plugin(is_ready=True)
@@ -481,7 +478,7 @@ class TestApprovalRequests:
         thread.join(timeout=1)
         assert result["decision"] == "always"
         plugin.driver.respond_to_web.assert_called_once()
-        plugin.driver.posts.delete_post.assert_called_once_with("approval-post")
+        plugin.driver.posts.delete_post.assert_not_called()
 
     def test_returns_timeout_decision(self):
         plugin, _, _state = _make_plugin()

@@ -198,6 +198,7 @@ class ZeroClawPlugin(Plugin):
                 channel_id=message.channel_id,
                 root_id=root_id,
                 main_post_id=post_id,
+                user_text=message.text or "",
             )
 
         state.stop_event = threading.Event()
@@ -261,7 +262,7 @@ class ZeroClawPlugin(Plugin):
 
         post = self.driver.create_post(
             channel_id=message.channel_id,
-            message="_Запрос получен. Готовлю сессию..._",
+            message="> ⏳ Готовлю сессию...",
             root_id=root_id,
         )
         post_id = post["id"]
@@ -275,7 +276,7 @@ class ZeroClawPlugin(Plugin):
                 t_ready = time.monotonic()
                 self._lifecycle.wait_ready(service_dns)
                 ready_elapsed = round(time.monotonic() - t_ready)
-                patch_post(self.driver, post_id, f"Готов. Заняло {ready_elapsed}с")
+                patch_post(self.driver, post_id, f"> ✅ Сессия готова {ready_elapsed}с")
             except TimeoutError:
                 metrics.messages_total.labels(outcome="timeout").inc()
                 metrics.message_duration.labels(outcome="timeout").observe(time.monotonic() - t0)
@@ -283,7 +284,7 @@ class ZeroClawPlugin(Plugin):
                 patch_post(
                     self.driver,
                     post_id,
-                    "Превышено время ожидания запуска сессии. Попробуйте ещё раз.",
+                    "> ❌ Превышено время ожидания запуска сессии. Попробуйте ещё раз.",
                 )
                 return
         else:
