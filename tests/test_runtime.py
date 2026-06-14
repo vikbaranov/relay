@@ -1,4 +1,4 @@
-"""LifecycleManager and UserStateManager unit tests with mocked K8s clients."""
+"""RuntimeController and UserStateManager unit tests with mocked K8s clients."""
 
 import base64
 from datetime import UTC, datetime, timedelta
@@ -12,7 +12,6 @@ from app.config import Settings
 from app.identity import identity_configmap_name, object_name, zeroclaw_config_secret_name
 from app.k8s.config import ZeroClawConfigBuilder
 from app.k8s.controller import RuntimeController
-from app.k8s.lifecycle import LifecycleManager
 from app.k8s.provisioner import ResourceProvisioner
 from app.k8s.user_state import UserStateManager
 from app.k8s.workspace import _workspace_default
@@ -62,24 +61,6 @@ def _make_controller_and_state(settings=None):
     return controller, provisioner, user_state, core, apps
 
 
-def _make_lifecycle_and_state(settings=None):
-    s = settings or _settings()
-    core = MagicMock()
-    apps = MagicMock()
-    secret = s.k8s_name_secret.encode()
-    ns = s.k8s_namespace
-    lifecycle = LifecycleManager(settings=s, core=core, apps=apps, secret=secret, ns=ns)
-    user_state = UserStateManager(
-        core=core,
-        apps=apps,
-        secret=secret,
-        ns=ns,
-        allowed_models=s.allowed_models,
-    )
-    lifecycle.set_user_state(user_state)
-    return lifecycle, user_state, core, apps
-
-
 class TestSettingsModels:
     def test_allowed_models_are_parsed_from_comma_separated_string(self):
         settings = _settings(allowed_models="gpt-4o-mini, gpt-4o ,gpt-4.1")
@@ -126,14 +107,14 @@ class TestSettingsModels:
 
 class TestEnsureRuntime:
     def test_creates_resources_on_first_call(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         core.read_namespaced_persistent_volume_claim.side_effect = (
             k8s_client.exceptions.ApiException(status=404)
         )
         core.read_namespaced_service.side_effect = k8s_client.exceptions.ApiException(status=404)
         apps.read_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(status=404)
 
-        dns = lifecycle.ensure_all("user1")
+        dns = controller.ensure_all("user1")
 
         assert dns.startswith("zc-")
         assert dns.endswith(".svc.cluster.local")
@@ -142,14 +123,14 @@ class TestEnsureRuntime:
         apps.create_namespaced_deployment.assert_called_once()
 
     def test_created_runtime_resources_are_labeled_with_mm_user_id(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         core.read_namespaced_persistent_volume_claim.side_effect = (
             k8s_client.exceptions.ApiException(status=404)
         )
         core.read_namespaced_service.side_effect = k8s_client.exceptions.ApiException(status=404)
         apps.read_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(status=404)
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         pvc_body = core.create_namespaced_persistent_volume_claim.call_args[0][1]
         service_body = core.create_namespaced_service.call_args[0][1]
@@ -161,13 +142,13 @@ class TestEnsureRuntime:
         assert deploy_body.spec.template.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
 
     def test_created_identity_configmap_is_labeled_with_mm_user_id(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         identity_name = identity_configmap_name(b"test-secret", "user1")
         identity_cm_body = next(
@@ -178,23 +159,23 @@ class TestEnsureRuntime:
         assert identity_cm_body.metadata.labels["ai.relay.io/mm-user-id"] == "user1"
 
     def test_skips_creation_if_resources_exist(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         core.create_namespaced_persistent_volume_claim.assert_not_called()
         apps.create_namespaced_deployment.assert_not_called()
 
     def test_scales_up_idle_deployment(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 0
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         patch_body = next(
             call[0][2]
@@ -204,7 +185,7 @@ class TestEnsureRuntime:
         assert patch_body["spec"]["replicas"] == 1
 
     def test_patches_existing_deployment_to_secret_config_volume(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         existing_deploy.spec.template.spec.volumes = [
@@ -215,7 +196,7 @@ class TestEnsureRuntime:
         ]
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         patch_body = apps.patch_namespaced_deployment.call_args[0][2]
         volumes = patch_body["spec"]["template"]["spec"]["volumes"]
@@ -267,33 +248,33 @@ class TestEnsureRuntime:
         assert dns == f"{name}.sandbox.svc.cluster.local"
 
     def test_shared_configmap_ensured_only_once_per_lifecycle(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
         first_replace_count = core.replace_namespaced_config_map.call_count
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
         assert core.replace_namespaced_config_map.call_count == first_replace_count
 
     def test_shared_configmap_does_not_contain_openai_api_key(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state(
+        controller, _, _, core, apps = _make_controller_and_state(
             _settings(openai_api_key="sk-secret-fixture")
         )
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         cm_body = core.replace_namespaced_config_map.call_args[0][2]
         assert "config.toml" not in cm_body.data
         assert "sk-secret-fixture" not in str(cm_body.data)
 
     def test_creates_per_user_config_secret_with_provider_settings(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state(
+        controller, _, _, core, apps = _make_controller_and_state(
             _settings(
                 openai_api_key="sk-secret-fixture",
                 openai_base_url="custom:https://example.test/v1",
@@ -304,7 +285,7 @@ class TestEnsureRuntime:
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
@@ -316,7 +297,7 @@ class TestEnsureRuntime:
         assert 'api_key = "sk-secret-fixture"' in config_toml
 
     def test_user_config_uses_default_allowed_model(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state(
+        controller, _, _, core, apps = _make_controller_and_state(
             _settings(allowed_models="default-model,other-model")
         )
         core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
@@ -324,7 +305,7 @@ class TestEnsureRuntime:
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
@@ -333,7 +314,7 @@ class TestEnsureRuntime:
         assert 'model = "default-model"' in config_toml
 
     def test_user_config_uses_allowed_model_override(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state(
+        controller, _, _, core, apps = _make_controller_and_state(
             _settings(allowed_models="default-model,custom-model")
         )
         identity_cm = MagicMock()
@@ -344,7 +325,7 @@ class TestEnsureRuntime:
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
@@ -353,7 +334,7 @@ class TestEnsureRuntime:
         assert 'model = "custom-model"' in config_toml
 
     def test_user_config_ignores_stale_model_override(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state(
+        controller, _, _, core, apps = _make_controller_and_state(
             _settings(allowed_models="default-model,custom-model")
         )
         identity_cm = MagicMock()
@@ -364,7 +345,7 @@ class TestEnsureRuntime:
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
@@ -373,7 +354,7 @@ class TestEnsureRuntime:
         assert 'model = "default-model"' in config_toml
 
     def test_deployment_mounts_per_user_config_secret(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state(
+        controller, _, _, core, apps = _make_controller_and_state(
             _settings(openai_api_key="sk-secret-fixture")
         )
         core.read_namespaced_persistent_volume_claim.side_effect = (
@@ -382,7 +363,7 @@ class TestEnsureRuntime:
         core.read_namespaced_service.side_effect = k8s_client.exceptions.ApiException(status=404)
         apps.read_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(status=404)
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         deploy_body = apps.create_namespaced_deployment.call_args[0][1]
         model_config_volume = next(
@@ -393,7 +374,7 @@ class TestEnsureRuntime:
         assert model_config_volume.config_map is None
 
     def test_user_config_shell_env_passthrough_reflects_user_envs(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         env_secret = MagicMock()
         env_secret.data = {"GITHUB_TOKEN": "dG9rZW4=", "MY_KEY": "dmFsdWU="}
         core.read_namespaced_secret.side_effect = [
@@ -406,7 +387,7 @@ class TestEnsureRuntime:
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
@@ -416,7 +397,7 @@ class TestEnsureRuntime:
         assert "MY_KEY" in config_toml
 
     def test_restart_updates_user_config_before_pod_restart(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state(
+        controller, _, _, core, apps = _make_controller_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
         identity_cm = MagicMock()
@@ -426,7 +407,7 @@ class TestEnsureRuntime:
         env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
         core.read_namespaced_secret.return_value = env_secret
 
-        lifecycle.restart_if_running("user1")
+        controller.restart_if_running("user1")
 
         cname = zeroclaw_config_secret_name(b"test-secret", "user1")
         patch_call = core.patch_namespaced_secret.call_args
@@ -437,19 +418,19 @@ class TestEnsureRuntime:
         apps.patch_namespaced_deployment.assert_called_once()
 
     def test_restart_propagates_non_404_config_patch_error_without_pod_restart(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         env_secret = MagicMock()
         env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
         core.read_namespaced_secret.return_value = env_secret
         core.patch_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=500)
 
         with pytest.raises(k8s_client.exceptions.ApiException):
-            lifecycle.restart_if_running("user1")
+            controller.restart_if_running("user1")
 
         apps.patch_namespaced_deployment.assert_not_called()
 
     def test_restart_propagates_non_404_deployment_patch_error(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         env_secret = MagicMock()
         env_secret.data = {"GITHUB_TOKEN": "dG9rZW4="}
         core.read_namespaced_secret.return_value = env_secret
@@ -458,10 +439,10 @@ class TestEnsureRuntime:
         )
 
         with pytest.raises(k8s_client.exceptions.ApiException):
-            lifecycle.restart_if_running("user1")
+            controller.restart_if_running("user1")
 
     def test_ensure_runtime_calls_ensure_identity_configmap(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
@@ -475,18 +456,18 @@ class TestEnsureRuntime:
             return MagicMock()
 
         core.read_namespaced_config_map.side_effect = _read_cm
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
         identity_name = identity_configmap_name(b"test-secret", "user1")
         assert any(identity_name in c for c in read_calls)
 
     def test_user_config_autonomy_defaults_to_full(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
         existing_deploy = MagicMock()
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
@@ -495,7 +476,7 @@ class TestEnsureRuntime:
         assert 'level = "full"' in config_toml
 
     def test_user_config_uses_supervised_autonomy_override(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         identity_cm = MagicMock()
         identity_cm.data = {"AUTONOMY": "supervised"}
         core.read_namespaced_config_map.return_value = identity_cm
@@ -504,7 +485,7 @@ class TestEnsureRuntime:
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
@@ -513,7 +494,7 @@ class TestEnsureRuntime:
         assert 'level = "supervised"' in config_toml
 
     def test_user_config_ignores_invalid_autonomy_override(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         identity_cm = MagicMock()
         identity_cm.data = {"AUTONOMY": "invalid"}
         core.read_namespaced_config_map.return_value = identity_cm
@@ -522,7 +503,7 @@ class TestEnsureRuntime:
         existing_deploy.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing_deploy
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         expected_name = zeroclaw_config_secret_name(b"test-secret", "user1")
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
@@ -531,7 +512,7 @@ class TestEnsureRuntime:
         assert 'level = "full"' in config_toml
 
     def test_restart_updates_user_config_with_autonomy(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         identity_cm = MagicMock()
         identity_cm.data = {"AUTONOMY": "supervised"}
         core.read_namespaced_config_map.return_value = identity_cm
@@ -539,21 +520,21 @@ class TestEnsureRuntime:
         env_secret.data = {}
         core.read_namespaced_secret.return_value = env_secret
 
-        lifecycle.restart_if_running("user1")
+        controller.restart_if_running("user1")
 
         patch_call = core.patch_namespaced_secret.call_args
         config_toml = patch_call[0][2]["stringData"]["config.toml"]
         assert 'level = "supervised"' in config_toml
 
     def test_deployment_mounts_identity_volume(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         core.read_namespaced_persistent_volume_claim.side_effect = (
             k8s_client.exceptions.ApiException(status=404)
         )
         core.read_namespaced_service.side_effect = k8s_client.exceptions.ApiException(status=404)
         apps.read_namespaced_deployment.side_effect = k8s_client.exceptions.ApiException(status=404)
 
-        lifecycle.ensure_all("user1")
+        controller.ensure_all("user1")
 
         deploy_body = apps.create_namespaced_deployment.call_args[0][1]
         volumes = deploy_body.spec.template.spec.volumes
@@ -579,7 +560,7 @@ class TestListIdle:
         return d
 
     def test_returns_idle_deployments(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         old_ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
         fresh_ts = datetime.now(UTC).isoformat()
         apps.list_namespaced_deployment.return_value = MagicMock(
@@ -588,23 +569,23 @@ class TestListIdle:
                 self._make_deploy("zc-new", fresh_ts),
             ]
         )
-        idle = lifecycle.list_idle(ttl_seconds=3600)
+        idle = controller.list_idle(ttl_seconds=3600)
         assert idle == ["zc-old"]
 
     def test_skips_already_scaled_down(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
+        controller, _, _, core, apps = _make_controller_and_state()
         old_ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
         apps.list_namespaced_deployment.return_value = MagicMock(
             items=[self._make_deploy("zc-old", old_ts, replicas=0)]
         )
-        idle = lifecycle.list_idle(ttl_seconds=60)
+        idle = controller.list_idle(ttl_seconds=60)
         assert idle == []
 
 
 class TestScaleDown:
     def test_patches_replicas_to_zero(self):
-        lifecycle, _, core, apps = _make_lifecycle_and_state()
-        lifecycle.scale_down("zc-abc")
+        controller, _, _, core, apps = _make_controller_and_state()
+        controller.scale_down("zc-abc")
         apps.patch_namespaced_deployment.assert_called_once()
         body = apps.patch_namespaced_deployment.call_args[0][2]
         assert body["spec"]["replicas"] == 0
@@ -612,33 +593,33 @@ class TestScaleDown:
 
 class TestWorkspaceFiles:
     def test_get_returns_none_when_configmap_absent(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
         assert user_state.get_workspace_file("user1", "SOUL.md") is None
 
     def test_get_returns_content_from_configmap(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {"SOUL.md": "custom soul"}
         core.read_namespaced_config_map.return_value = cm
         assert user_state.get_workspace_file("user1", "SOUL.md") == "custom soul"
 
     def test_get_returns_none_for_missing_key(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {"IDENTITY.md": "identity"}
         core.read_namespaced_config_map.return_value = cm
         assert user_state.get_workspace_file("user1", "SOUL.md") is None
 
     def test_set_patches_existing_configmap(self):
-        _, user_state, core, apps = _make_lifecycle_and_state()
+        _, _, user_state, core, apps = _make_controller_and_state()
         user_state.set_workspace_file("user1", "SOUL.md", "new soul")
         core.patch_namespaced_config_map.assert_called_once()
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["SOUL.md"] == "new soul"
 
     def test_set_creates_configmap_when_absent(self):
-        _, user_state, core, apps = _make_lifecycle_and_state()
+        _, _, user_state, core, apps = _make_controller_and_state()
         core.patch_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(
             status=404
         )
@@ -649,19 +630,19 @@ class TestWorkspaceFiles:
         assert cm_body.data["IDENTITY.md"] == _workspace_default("IDENTITY.md")
 
     def test_reset_returns_false_when_configmap_absent(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
         assert user_state.reset_workspace_file("user1", "SOUL.md") is False
 
     def test_reset_returns_false_when_key_absent(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {}
         core.read_namespaced_config_map.return_value = cm
         assert user_state.reset_workspace_file("user1", "SOUL.md") is False
 
     def test_reset_patches_key_to_default(self):
-        _, user_state, core, apps = _make_lifecycle_and_state()
+        _, _, user_state, core, apps = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {"SOUL.md": "custom"}
         core.read_namespaced_config_map.return_value = cm
@@ -670,7 +651,7 @@ class TestWorkspaceFiles:
         assert body["data"]["SOUL.md"] == _workspace_default("SOUL.md")
 
     def test_get_returns_none_for_default_content(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {"SOUL.md": _workspace_default("SOUL.md")}
         core.read_namespaced_config_map.return_value = cm
@@ -695,7 +676,7 @@ class TestWorkspaceFiles:
         core.create_namespaced_config_map.assert_not_called()
 
     def test_get_user_model_returns_override_when_allowed(self):
-        _, user_state, core, _ = _make_lifecycle_and_state(
+        _, _, user_state, core, _ = _make_controller_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
         cm = MagicMock()
@@ -704,7 +685,7 @@ class TestWorkspaceFiles:
         assert user_state.get_user_model("user1") == "gpt-4o"
 
     def test_get_user_model_returns_default_when_absent(self):
-        _, user_state, core, _ = _make_lifecycle_and_state(
+        _, _, user_state, core, _ = _make_controller_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
         cm = MagicMock()
@@ -713,7 +694,7 @@ class TestWorkspaceFiles:
         assert user_state.get_user_model("user1") == "gpt-4o-mini"
 
     def test_get_user_model_returns_default_when_stale(self):
-        _, user_state, core, _ = _make_lifecycle_and_state(
+        _, _, user_state, core, _ = _make_controller_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
         cm = MagicMock()
@@ -722,13 +703,13 @@ class TestWorkspaceFiles:
         assert user_state.get_user_model("user1") == "gpt-4o-mini"
 
     def test_set_user_model_rejects_unknown_model(self):
-        _, user_state, _, _ = _make_lifecycle_and_state(
+        _, _, user_state, _, _ = _make_controller_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
         assert user_state.set_user_model("user1", "bad-model") is False
 
     def test_set_user_model_patches_configmap(self):
-        _, user_state, core, apps = _make_lifecycle_and_state(
+        _, _, user_state, core, apps = _make_controller_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
         assert user_state.set_user_model("user1", "gpt-4o") is True
@@ -737,7 +718,7 @@ class TestWorkspaceFiles:
         assert body["data"]["MODEL"] == "gpt-4o"
 
     def test_reset_user_model_returns_false_when_absent(self):
-        _, user_state, core, apps = _make_lifecycle_and_state(
+        _, _, user_state, core, apps = _make_controller_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
         cm = MagicMock()
@@ -748,7 +729,7 @@ class TestWorkspaceFiles:
         apps.patch_namespaced_deployment.assert_not_called()
 
     def test_reset_user_model_removes_override(self):
-        _, user_state, core, apps = _make_lifecycle_and_state(
+        _, _, user_state, core, apps = _make_controller_and_state(
             _settings(allowed_models="gpt-4o-mini,gpt-4o")
         )
         cm = MagicMock()
@@ -759,44 +740,44 @@ class TestWorkspaceFiles:
         assert body["data"]["MODEL"] is None
 
     def test_get_user_autonomy_returns_full_when_absent(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {}
         core.read_namespaced_config_map.return_value = cm
         assert user_state.get_user_autonomy("user1") == "full"
 
     def test_get_user_autonomy_returns_full_when_configmap_missing(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
         assert user_state.get_user_autonomy("user1") == "full"
 
     def test_get_user_autonomy_returns_supervised_when_set(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {"AUTONOMY": "supervised"}
         core.read_namespaced_config_map.return_value = cm
         assert user_state.get_user_autonomy("user1") == "supervised"
 
     def test_get_user_autonomy_returns_full_for_invalid_value(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {"AUTONOMY": "invalid"}
         core.read_namespaced_config_map.return_value = cm
         assert user_state.get_user_autonomy("user1") == "full"
 
     def test_set_user_autonomy_rejects_unknown_level(self):
-        _, user_state, _, _ = _make_lifecycle_and_state()
+        _, _, user_state, _, _ = _make_controller_and_state()
         assert user_state.set_user_autonomy("user1", "turbo") is False
 
     def test_set_user_autonomy_patches_configmap(self):
-        _, user_state, core, apps = _make_lifecycle_and_state()
+        _, _, user_state, core, apps = _make_controller_and_state()
         assert user_state.set_user_autonomy("user1", "supervised") is True
         core.patch_namespaced_config_map.assert_called_once()
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["AUTONOMY"] == "supervised"
 
     def test_set_user_autonomy_creates_configmap_when_absent(self):
-        _, user_state, core, apps = _make_lifecycle_and_state()
+        _, _, user_state, core, apps = _make_controller_and_state()
         core.patch_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(
             status=404
         )
@@ -806,7 +787,7 @@ class TestWorkspaceFiles:
         assert cm_body.data["AUTONOMY"] == "supervised"
 
     def test_reset_user_autonomy_returns_false_when_absent(self):
-        _, user_state, core, apps = _make_lifecycle_and_state()
+        _, _, user_state, core, apps = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {}
         core.read_namespaced_config_map.return_value = cm
@@ -815,12 +796,12 @@ class TestWorkspaceFiles:
         apps.patch_namespaced_deployment.assert_not_called()
 
     def test_reset_user_autonomy_returns_false_when_configmap_missing(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
         assert user_state.reset_user_autonomy("user1") is False
 
     def test_reset_user_autonomy_removes_override(self):
-        _, user_state, core, apps = _make_lifecycle_and_state()
+        _, _, user_state, core, apps = _make_controller_and_state()
         cm = MagicMock()
         cm.data = {"AUTONOMY": "supervised"}
         core.read_namespaced_config_map.return_value = cm
@@ -831,13 +812,13 @@ class TestWorkspaceFiles:
 
 class TestUserStateToken:
     def test_get_user_token_returns_none_when_secret_missing(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
 
         assert user_state.get_user_token("user1") is None
 
     def test_get_user_token_returns_none_when_key_absent(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         secret = MagicMock()
         secret.data = {"OTHER_KEY": base64.b64encode(b"value").decode()}
         core.read_namespaced_secret.return_value = secret
@@ -845,7 +826,7 @@ class TestUserStateToken:
         assert user_state.get_user_token("user1") is None
 
     def test_get_user_token_decodes_base64_value(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         secret = MagicMock()
         secret.data = {"OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-test-key").decode()}
         core.read_namespaced_secret.return_value = secret
@@ -853,7 +834,7 @@ class TestUserStateToken:
         assert user_state.get_user_token("user1") == "sk-test-key"
 
     def test_set_user_token_patches_secret_with_string_data(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
 
         user_state.set_user_token("user1", "sk-my-key")
 
@@ -861,7 +842,7 @@ class TestUserStateToken:
         assert first_body == {"stringData": {"OPENAI_API_KEY_OVERRIDE": "sk-my-key"}}
 
     def test_reset_user_token_returns_false_when_key_absent(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         secret = MagicMock()
         secret.data = {}
         core.read_namespaced_secret.return_value = secret
@@ -869,7 +850,7 @@ class TestUserStateToken:
         assert user_state.reset_user_token("user1") is False
 
     def test_reset_user_token_deletes_key_and_returns_true(self):
-        _, user_state, core, _ = _make_lifecycle_and_state()
+        _, _, user_state, core, _ = _make_controller_and_state()
         secret = MagicMock()
         secret.data = {"OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-key").decode()}
         core.read_namespaced_secret.return_value = secret
