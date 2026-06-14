@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/vikbaranov/relay/compare/v0.8.0...v0.9.0) (2026-06-14)
+
+
+### Features
+
+* refactor lifecycle manager ([#41](https://github.com/vikbaranov/relay/issues/41)) ([bb9d4b2](https://github.com/vikbaranov/relay/commit/bb9d4b2fe9020d6af098fce6987ccebc2ea552c7))
+
 ## [0.8.0](https://github.com/vikbaranov/relay/compare/v0.7.1...v0.8.0) (2026-06-02)
 
 
