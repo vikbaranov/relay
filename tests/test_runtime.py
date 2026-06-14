@@ -10,7 +10,10 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.identity import identity_configmap_name, object_name, zeroclaw_config_secret_name
+from app.k8s.config import ZeroClawConfigBuilder
+from app.k8s.controller import RuntimeController
 from app.k8s.lifecycle import LifecycleManager
+from app.k8s.provisioner import ResourceProvisioner
 from app.k8s.user_state import UserStateManager
 from app.k8s.workspace import _workspace_default
 
@@ -27,6 +30,37 @@ def _settings(**overrides) -> Settings:
     )
     base.update(overrides)
     return Settings(**base)
+
+
+def _make_controller_and_state(settings=None):
+    s = settings or _settings()
+    core = MagicMock()
+    apps = MagicMock()
+    secret = s.k8s_name_secret.encode()
+    ns = s.k8s_namespace
+    config_builder = ZeroClawConfigBuilder(s)
+    provisioner = ResourceProvisioner(
+        settings=s, core=core, apps=apps, secret=secret, ns=ns, config_builder=config_builder
+    )
+    user_state = UserStateManager(
+        core=core,
+        apps=apps,
+        secret=secret,
+        ns=ns,
+        restart_fn=lambda mm_user_id, **kw: None,
+        allowed_models=s.allowed_models,
+    )
+    controller = RuntimeController(
+        settings=s,
+        core=core,
+        apps=apps,
+        secret=secret,
+        ns=ns,
+        provisioner=provisioner,
+        user_state=user_state,
+        config_builder=config_builder,
+    )
+    return controller, provisioner, user_state, core, apps
 
 
 def _make_lifecycle_and_state(settings=None):
@@ -200,21 +234,38 @@ class TestEnsureRuntime:
         s = _settings(k8s_namespace="sandbox", k8s_name_secret="s")
         core = MagicMock()
         apps = MagicMock()
-        lifecycle = LifecycleManager(settings=s, core=core, apps=apps, secret=b"s", ns="sandbox")
+        config_builder = ZeroClawConfigBuilder(s)
+        provisioner = ResourceProvisioner(
+            settings=s,
+            core=core,
+            apps=apps,
+            secret=b"s",
+            ns="sandbox",
+            config_builder=config_builder,
+        )
         user_state = UserStateManager(
             core=core,
             apps=apps,
             secret=b"s",
             ns="sandbox",
-            restart_fn=lifecycle.restart_if_running,
+            restart_fn=lambda mm_user_id, **kw: None,
             allowed_models=s.allowed_models,
         )
-        lifecycle.set_user_state(user_state)
+        controller = RuntimeController(
+            settings=s,
+            core=core,
+            apps=apps,
+            secret=b"s",
+            ns="sandbox",
+            provisioner=provisioner,
+            user_state=user_state,
+            config_builder=config_builder,
+        )
         existing = MagicMock()
         existing.spec.replicas = 1
         apps.read_namespaced_deployment.return_value = existing
 
-        dns = lifecycle.ensure_all("user1")
+        dns = controller.ensure_all("user1")
         name = object_name(b"s", "user1")
         assert dns == f"{name}.sandbox.svc.cluster.local"
 
@@ -635,21 +686,21 @@ class TestWorkspaceFiles:
         assert user_state.get_workspace_file("user1", "SOUL.md") is None
 
     def test_ensure_identity_configmap_creates_on_first_call(self):
-        lifecycle, _, core, _ = _make_lifecycle_and_state()
+        _, provisioner, _, core, _ = _make_controller_and_state()
         core.read_namespaced_config_map.side_effect = k8s_client.exceptions.ApiException(status=404)
-        s = lifecycle._settings
+        s = _settings()
         labels = {s.k8s_label_mm_user: "user1"}
-        lifecycle._ensure_identity_configmap("user1", labels, {})
+        provisioner.ensure_identity_configmap("user1", labels, {})
         core.create_namespaced_config_map.assert_called_once()
         cm_body = core.create_namespaced_config_map.call_args[0][1]
         assert cm_body.metadata.name == identity_configmap_name(b"test-secret", "user1")
 
     def test_ensure_identity_configmap_skips_if_exists(self):
-        lifecycle, _, core, _ = _make_lifecycle_and_state()
+        _, provisioner, _, core, _ = _make_controller_and_state()
         core.read_namespaced_config_map.return_value = MagicMock()
-        s = lifecycle._settings
+        s = _settings()
         labels = {s.k8s_label_mm_user: "user1"}
-        lifecycle._ensure_identity_configmap("user1", labels, {})
+        provisioner.ensure_identity_configmap("user1", labels, {})
         core.create_namespaced_config_map.assert_not_called()
 
     def test_get_user_model_returns_override_when_allowed(self):
@@ -848,80 +899,57 @@ class TestZeroclawConfigTokenOverride:
     def test_config_toml_uses_global_key_when_no_override(self):
         import tomllib
 
-        lifecycle, _, _, _ = _make_lifecycle_and_state(
-            _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
-        )
-
-        toml_str = lifecycle._zeroclaw_config_toml([], api_key_override=None)
-        doc = tomllib.loads(toml_str)
-
+        s = _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
+        builder = ZeroClawConfigBuilder(s)
+        doc = tomllib.loads(builder.build([], api_key_override=None))
         assert doc["providers"]["models"]["openai"]["default"]["api_key"] == "sk-global"
 
     def test_config_toml_uses_override_key_when_provided(self):
         import tomllib
 
-        lifecycle, _, _, _ = _make_lifecycle_and_state(
-            _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
-        )
-
-        toml_str = lifecycle._zeroclaw_config_toml([], api_key_override="sk-user-override")
-        doc = tomllib.loads(toml_str)
-
+        s = _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
+        builder = ZeroClawConfigBuilder(s)
+        doc = tomllib.loads(builder.build([], api_key_override="sk-user-override"))
         assert doc["providers"]["models"]["openai"]["default"]["api_key"] == "sk-user-override"
 
     def test_get_user_env_keys_excludes_token_key(self):
         import base64
 
-        lifecycle, _, core, _ = _make_lifecycle_and_state()
+        _, provisioner, _, core, _ = _make_controller_and_state()
         secret = MagicMock()
         secret.data = {
             "MY_VAR": base64.b64encode(b"val").decode(),
             "OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-key").decode(),
         }
         core.read_namespaced_secret.return_value = secret
-
-        keys = lifecycle._get_user_env_keys("user1")
-
+        keys = provisioner.get_user_env_keys("user1")
         assert "OPENAI_API_KEY_OVERRIDE" not in keys
         assert "MY_VAR" in keys
 
     def test_ensure_user_zeroclaw_config_passes_token_override_to_toml(self):
-        import base64
         import tomllib
 
-        lifecycle, user_state, core, _ = _make_lifecycle_and_state(
+        _, provisioner, _, core, _ = _make_controller_and_state(
             _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
         )
-        # user has a token override stored in env secret
-        env_secret = MagicMock()
-        env_secret.data = {"OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-user").decode()}
-        # identity configmap has no model/autonomy override
-        cm = MagicMock()
-        cm.data = {}
-        core.read_namespaced_config_map.return_value = cm
-        # make read_namespaced_secret return env_secret for all calls
-        core.read_namespaced_secret.return_value = env_secret
-
-        lifecycle._ensure_user_zeroclaw_config("user1", [], {}, {})
-
+        core.read_namespaced_secret.return_value = MagicMock()  # secret exists → replace path
+        provisioner.ensure_user_config_secret("user1", [], "gpt-4o-mini", "full", "sk-user", {}, {})
         replace_call = core.replace_namespaced_secret.call_args
         body = replace_call[0][2]
-        toml_str = body.string_data["config.toml"]
-        doc = tomllib.loads(toml_str)
+        doc = tomllib.loads(body.string_data["config.toml"])
         assert doc["providers"]["models"]["openai"]["default"]["api_key"] == "sk-user"
 
     def test_restart_if_running_passes_token_override_to_toml(self):
+        import base64
         import tomllib
 
-        lifecycle, _, core, apps = _make_lifecycle_and_state(
+        controller, _, _, core, apps = _make_controller_and_state(
             _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
         )
         env_secret = MagicMock()
         env_secret.data = {"OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-user").decode()}
         core.read_namespaced_secret.return_value = env_secret
-
-        lifecycle.restart_if_running("user1")
-
+        controller.restart_if_running("user1")
         config_toml = core.patch_namespaced_secret.call_args[0][2]["stringData"]["config.toml"]
         doc = tomllib.loads(config_toml)
         assert doc["providers"]["models"]["openai"]["default"]["api_key"] == "sk-user"
