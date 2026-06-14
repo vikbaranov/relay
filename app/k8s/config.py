@@ -72,9 +72,11 @@ class ZeroClawConfigBuilder:
                 "models": {
                     "openai": {
                         "default": {
-                            "api_key": api_key_override or s.openai_api_key,
+                            "api_key": api_key_override
+                            if api_key_override is not None
+                            else s.openai_api_key,
                             "uri": s.openai_base_url,
-                            "model": model or s.default_model,
+                            "model": model if model is not None else s.default_model,
                         }
                     }
                 }
