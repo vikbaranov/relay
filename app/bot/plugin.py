@@ -68,16 +68,19 @@ class ZeroClawPlugin(Plugin):
                 get_driver=lambda: self.driver,
                 base_url=self._base_url,
                 user_state=user_state,
+                restart_fn=lifecycle.restart_if_running,
             ),
             model=ModelCommandHandler(
                 get_driver=lambda: self.driver,
                 user_state=user_state,
                 allowed_models=settings.allowed_models,
+                restart_fn=lifecycle.restart_if_running,
             ),
             workspace=WorkspaceFileCommandHandler(
                 get_driver=lambda: self.driver,
                 base_url=self._base_url,
                 user_state=user_state,
+                restart_fn=lifecycle.restart_if_running,
             ),
             skill=SkillCommandHandler(
                 get_driver=lambda: self.driver,
@@ -87,22 +90,26 @@ class ZeroClawPlugin(Plugin):
             autonomy=AutonomyCommandHandler(
                 get_driver=lambda: self.driver,
                 user_state=user_state,
+                restart_fn=lifecycle.restart_if_running,
             ),
             token=TokenCommandHandler(
                 get_driver=lambda: self.driver,
                 base_url=self._base_url,
                 user_state=user_state,
+                restart_fn=lifecycle.restart_if_running,
             ),
         )
         self._workspace_dialog = WorkspaceDialogHandler(
             get_driver=lambda: self.driver,
             user_state=user_state,
             base_url=self._base_url,
+            restart_fn=lifecycle.restart_if_running,
         )
         self._env_dialog = EnvDialogHandler(
             get_driver=lambda: self.driver,
             user_state=user_state,
             base_url=self._base_url,
+            restart_fn=lifecycle.restart_if_running,
         )
         self._skill_dialog = SkillDialogHandler(
             get_driver=lambda: self.driver,
@@ -113,6 +120,7 @@ class ZeroClawPlugin(Plugin):
             get_driver=lambda: self.driver,
             user_state=user_state,
             base_url=self._base_url,
+            restart_fn=lifecycle.restart_if_running,
         )
 
     # ── helpers ────────────────────────────────────────────────────────────────
