@@ -1,6 +1,5 @@
 import base64
 import logging
-from collections.abc import Callable
 
 from kubernetes import client
 
@@ -24,14 +23,12 @@ class UserStateManager:
         apps: client.AppsV1Api,
         secret: bytes,
         ns: str,
-        restart_fn: Callable[[str], None],
         allowed_models: list[str],
     ) -> None:
         self._core = core
         self._apps = apps
         self._secret = secret
         self._ns = ns
-        self._restart = restart_fn
         self._allowed_models = allowed_models
 
     @property
@@ -73,7 +70,6 @@ class UserStateManager:
                     data={**_workspace_default_data(), MODEL_KEY: model},
                 ),
             )
-        self._restart(mm_user_id)
         return True
 
     def reset_user_model(self, mm_user_id: str) -> bool:
@@ -84,7 +80,6 @@ class UserStateManager:
             if MODEL_KEY not in data:
                 return False
             self._core.patch_namespaced_config_map(name, self._ns, {"data": {MODEL_KEY: None}})
-            self._restart(mm_user_id)
             return True
         except client.exceptions.ApiException as exc:
             if exc.status == 404:
@@ -123,7 +118,6 @@ class UserStateManager:
                     data={**_workspace_default_data(), AUTONOMY_KEY: level},
                 ),
             )
-        self._restart(mm_user_id)
         return True
 
     def reset_user_autonomy(self, mm_user_id: str) -> bool:
@@ -139,7 +133,6 @@ class UserStateManager:
         if AUTONOMY_KEY not in data:
             return False
         self._core.patch_namespaced_config_map(name, self._ns, {"data": {AUTONOMY_KEY: None}})
-        self._restart(mm_user_id)
         return True
 
     def set_user_env(self, mm_user_id: str, key: str, value: str) -> None:
@@ -157,7 +150,6 @@ class UserStateManager:
                     string_data={key: value},
                 ),
             )
-        self._restart(mm_user_id)
 
     def list_user_envs(self, mm_user_id: str) -> list[str]:
         sname = env_secret_name(self._secret, mm_user_id)
@@ -177,7 +169,6 @@ class UserStateManager:
             if key not in (secret.data or {}):
                 return False
             self._core.patch_namespaced_secret(sname, self._ns, {"data": {key: None}})
-            self._restart(mm_user_id)
             return True
         except client.exceptions.ApiException as exc:
             if exc.status == 404:
@@ -214,7 +205,6 @@ class UserStateManager:
                     data={**_workspace_default_data(), filename: content},
                 ),
             )
-        self._restart(mm_user_id)
 
     def reset_workspace_file(self, mm_user_id: str, filename: str) -> bool:
         name = identity_configmap_name(self._secret, mm_user_id)
@@ -227,7 +217,6 @@ class UserStateManager:
             if data.get(filename) == default:
                 return False
             self._core.patch_namespaced_config_map(name, self._ns, {"data": {filename: default}})
-            self._restart(mm_user_id)
             return True
         except client.exceptions.ApiException as exc:
             if exc.status == 404:
