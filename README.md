@@ -15,8 +15,11 @@ A Kubernetes-native controller that connects Mattermost chat to [ZeroClaw](https
   - [Approval Workflow](#approval-workflow)
   - [Idle Reaper](#idle-reaper)
   - [User Environment Variables](#user-environment-variables)
+  - [Model Selection](#model-selection)
   - [Workspace Files (SOUL & IDENTITY)](#workspace-files-soul--identity)
-- [Autonomy Level](#autonomy-level)
+  - [Skills](#skills)
+  - [Autonomy Level](#autonomy-level)
+  - [Personal API Token](#personal-api-token)
 - [Configuration](#configuration)
 - [Local Setup](#local-setup)
   - [Pre-commit hooks](#pre-commit-hooks)
@@ -35,27 +38,29 @@ graph TD
 
     subgraph ctrl [relay controller]
         P[ZeroClawPlugin]
-        RM[RuntimeManager]
+        LM[LifecycleManager]
         IR[IdleReaper]
         HM[Health & Metrics\n:8080]
     end
 
     subgraph k8s [Kubernetes — sandbox namespace]
         ZC["ZeroClaw pods\none per user"]
-        CM[LLM ConfigMap]
+        CM[Workspace defaults ConfigMap]
         ICM[Identity ConfigMap\none per user]
+        USC[User config Secrets]
         SEC[User env Secrets]
     end
 
     MM -- user messages --> P
     P -- approval buttons --> MM
     MM -- button clicks --> P
-    P -- ensure / wake up --> RM
-    RM -- create & patch --> k8s
-    IR -- scale to 0 when idle --> RM
+    P -- ensure / wake up --> LM
+    LM -- create & patch --> k8s
+    IR -- scale to 0 when idle --> LM
     P -- WebSocket stream --> ZC
     ZC -. mounts .-> CM
     ZC -. mounts .-> ICM
+    ZC -. config.toml .-> USC
     ZC -. env vars .-> SEC
 ```
 
@@ -67,7 +72,7 @@ The controller holds no database. All state lives in Kubernetes objects: Deploym
 app/
   main.py              # entry point → run_bot(get_settings())
   config.py            # Settings (Pydantic BaseSettings, reads env/.env)
-  identity.py          # HMAC naming: object_name, pvc_name, env_secret_name, identity_configmap_name, session_id
+  identity.py          # HMAC naming: object_name, pvc_name, env_secret_name, identity_configmap_name, zeroclaw_config_secret_name, session_id
   metrics.py           # Prometheus metric definitions
   logging.py           # JSON structured log formatter
   health.py            # HTTP server on :8080 (/healthz /readyz /metrics)
@@ -75,14 +80,17 @@ app/
     runner.py          # wires Settings → K8s clients → plugin → mmpy_bot.Bot
     plugin.py          # ZeroClawPlugin: handle_message, handle_approval, webhook handlers
     approval.py        # ApprovalManager: request/resolve approval lifecycle
-    commands.py        # CommandHandler: !new/!clear/!stop/!help/!env/!soul/!identity
-    dialogs.py         # DialogHandler: Mattermost interactive dialogs for env/workspace files
+    commands.py        # CommandHandler: !new/!clear/!stop/!help/!env/!model/!soul/!identity/!skill/!autonomy/!token
+    dialogs.py         # DialogHandler: Mattermost interactive dialogs for env/workspace files, skills, and tokens
     stream_handler.py  # StreamHandler: frame → Mattermost post text
     formatting.py      # cursor char, update interval, tool icons, truncation
   k8s/
     client.py          # build_k8s_clients() — incluster or kubeconfig mode
-    runtime.py         # RuntimeManager — public facade delegating to Lifecycle + UserState
     lifecycle.py       # LifecycleManager — ensure/scale per-user K8s resources
+    config.py          # ZeroClawConfigBuilder — renders per-user config.toml
+    provisioner.py     # ResourceProvisioner — resource creation helpers
+    controller.py      # RuntimeController split facade used by controller tests
+    skills.py          # SkillManager — list/show/create/remove skills inside running pods
     user_state.py      # UserStateManager — env secrets + workspace file CRUD
     reaper.py          # IdleReaper daemon thread
     workspace.py       # workspace file defaults loader (SOUL.md, IDENTITY.md)
@@ -113,8 +121,8 @@ tests/
 ## Request Flow
 
 1. User posts a message in Mattermost.
-2. `ZeroClawPlugin.handle_message()` checks for bot commands (`!new`, `!clear`, `!stop`, `!env`, `!soul`, `!identity`, `!autonomy`, `!help`). If none match, it proceeds.
-3. `RuntimeManager.ensure_runtime(mm_user_id)` creates (or re-enables) the user's Deployment, Service, and PVC.
+2. `ZeroClawPlugin.handle_message()` checks for bot commands (`!new`, `!clear`, `!stop`, `!env`, `!model`, `!soul`, `!identity`, `!skill`, `!autonomy`, `!token`, `!help`). If none match, it proceeds.
+3. `LifecycleManager.ensure_all(mm_user_id)` creates (or re-enables) the user's Deployment, Service, PVC, identity ConfigMap, env Secret, and per-user ZeroClaw config Secret.
 4. If the pod is not yet ready, a placeholder post is created ("Preparing session…") and `wait_ready()` polls the pod's `/health` endpoint until 200 or timeout. If the pod is already warm, a cursor post (`▌`) is created immediately.
 5. `_run_stream()` derives a session ID from the conversation scope and generation counter, opens a WebSocket to `ws://{service-dns}:{port}/ws/chat?session_id={sid}`, and starts streaming.
 6. Frames from ZeroClaw are processed by `StreamHandler` and rendered back into the Mattermost post in near-real-time (~1 update/second).
@@ -145,6 +153,7 @@ object name      : zc-{hmac(K8S_NAME_SECRET, mm_user_id)[:20]}
 pvc name         : {object_name}-data
 env secret       : {object_name}-env
 identity configmap: {object_name}-identity
+zeroclaw config  : {object_name}-config
 session id       : mm-{sha256(scope + ":" + generation)[:24]}
 ```
 
@@ -152,24 +161,26 @@ Names are **deterministic** (survive pod restarts), **non-reversible** without t
 
 ### Runtime Provisioning
 
-`RuntimeManager.ensure_runtime(mm_user_id)` is called on every message and is idempotent. Internally it delegates to `LifecycleManager.ensure_all()`, which creates resources in this order:
+`LifecycleManager.ensure_all(mm_user_id)` is called on every message and is idempotent. It creates resources in this order:
 
-1. **Global ConfigMap + provider config Secret** — written once per controller lifecycle. The ConfigMap contains non-sensitive workspace defaults for `SOUL.md` and `IDENTITY.md`. The ZeroClaw `config.toml`, including the provider API key, is stored in a Kubernetes Secret and mounted at `ZEROCLAW_CONFIG_MOUNT`. Updating `OPENAI_MODEL` and restarting the controller is sufficient to change the model for all pods.
+1. **Global ConfigMap + provider config Secret** — written once per controller lifecycle. The ConfigMap contains non-sensitive workspace defaults for `SOUL.md` and `IDENTITY.md`. The provider Secret contains a default ZeroClaw `config.toml` built from `ALLOWED_MODELS`, `ALLOWED_COMMANDS`, `OPENAI_API_KEY`, and `OPENAI_BASE_URL`.
 
 2. **Identity ConfigMap** — created once per user (`{name}-identity`). Pre-populated with the global `SOUL.md` and `IDENTITY.md` defaults. Users can override these files via `!soul set` and `!identity set`.
 
-3. **PVC** — created once per user (`ReadWriteOnce`, size from `USER_PVC_SIZE`). Persists across pod scale-up/down cycles. Never deleted by the controller.
+3. **Per-user ZeroClaw config Secret** — created or replaced on each ensure as `{name}-config`. It contains the effective `config.toml`: the user's selected model, autonomy level, optional personal API key, allowed commands, and user env passthrough list. A config hash annotation is patched onto the pod template during ensure so config changes are picked up by the runtime.
 
-4. **Service** — created once per user (`ClusterIP`). Provides stable in-cluster DNS regardless of pod restarts.
+4. **PVC** — created once per user (`ReadWriteOnce`, size from `USER_PVC_SIZE`). Persists across pod scale-up/down cycles. Never deleted by the controller.
 
-5. **Deployment** — created once per user. If it already exists with `replicas=0` (scaled down by the reaper), it is patched to `replicas=1` and the `last-activity` annotation is updated.
+5. **Service** — created once per user (`ClusterIP`). Provides stable in-cluster DNS regardless of pod restarts.
+
+6. **Deployment** — created once per user. If it already exists with `replicas=0` (scaled down by the reaper), it is patched to `replicas=1` and the `last-activity` annotation is updated.
 
 Each pod runs with a hardened security context: `runAsNonRoot`, no privilege escalation, all capabilities dropped, `seccomp: RuntimeDefault`. The service account token is not automounted.
 
 ```
 Volume mounts per pod:
   data         → PVC at ZEROCLAW_DATA_PATH (/zeroclaw-data/workspace)
-  model-config → Global Secret at ZEROCLAW_CONFIG_MOUNT (/zeroclaw-data/.zeroclaw/)  [read-only]
+  model-config → Per-user Secret {name}-config at ZEROCLAW_CONFIG_MOUNT (/zeroclaw-data/.zeroclaw/)  [read-only]
   identity     → Per-user Identity ConfigMap, mounts SOUL.md and IDENTITY.md into workspace  [read-only]
   env vars     → Optional Secret {name}-env (user-supplied env, loaded via envFrom)
 ```
@@ -223,7 +234,21 @@ Commands:
 - `!env list` — lists key names (never values).
 - `!env del KEY` — removes the key.
 
-Any change to the Secret triggers a rolling restart of the user's pod (via the `kubectl.kubernetes.io/restartedAt` annotation) so the new value takes effect immediately.
+Changes are included in the ZeroClaw `shell_env_passthrough` list on the next runtime ensure. A running pod may need a new message, restart, or rollout before new values are visible inside the sandbox.
+
+`OPENAI_API_KEY_OVERRIDE` is reserved for `!token` and is hidden from `!env list`.
+
+### Model Selection
+
+The controller exposes only the models configured in `ALLOWED_MODELS`. The first model in the comma-separated list is the default for users who have not selected an override.
+
+Commands:
+- `!model list` — list allowed models and mark the current one.
+- `!model show` — display the current model.
+- `!model set MODEL` — select one of the allowed models for the user or channel runtime.
+- `!model reset` — return to the first entry in `ALLOWED_MODELS`.
+
+Model changes are written into the per-user identity ConfigMap. The effective model is rendered into the per-user ZeroClaw config Secret on the next runtime ensure.
 
 ### Workspace Files (SOUL & IDENTITY)
 
@@ -232,12 +257,24 @@ Each ZeroClaw pod receives two workspace files mounted from the per-user identit
 - **SOUL.md** — defines the agent's core principles and personality.
 - **IDENTITY.md** — defines who the agent is.
 
-Global defaults live in `app/workspace/`. Per-user overrides are stored in the identity ConfigMap and take precedence. Changes trigger a rolling restart of the user's pod.
+Global defaults live in `app/workspace/`. Per-user overrides are stored in the identity ConfigMap and take precedence. A running pod may need a new message, restart, or rollout before mounted file changes are visible inside the sandbox.
 
 Commands:
 - `!soul show` / `!identity show` — display the current file (or confirm the global default is in use).
 - `!soul set` / `!identity set` — opens a Mattermost interactive dialog with a textarea pre-filled with the current content.
 - `!soul reset` / `!identity reset` — reverts the file to the global default.
+
+### Skills
+
+Users can manage ZeroClaw skills inside a running sandbox pod. Skill names must use lowercase letters, digits, and hyphens, and must start with a lowercase letter or digit.
+
+Commands:
+- `!skill list` — run `zeroclaw skills list` in the user's pod.
+- `!skill show <name>` — display `skills/<name>/SKILL.md` from the workspace.
+- `!skill create <name>` — open a Mattermost dialog for `SKILL.md` content, then install it with `zeroclaw skills install`.
+- `!skill remove <name>` — remove the installed skill.
+
+Skill commands require the sandbox pod to be running. If it is not running, send any normal message first to start the session.
 
 ### Autonomy Level
 
@@ -252,6 +289,17 @@ Commands:
 - `!autonomy show` — display the current autonomy level.
 - `!autonomy set full` / `!autonomy set supervised` — change the level (takes effect on the next message).
 - `!autonomy reset` — revert to the default (`supervised`).
+
+### Personal API Token
+
+Users can override the global `OPENAI_API_KEY` for their own sandbox. The token is stored in the per-user env Secret under the reserved key `OPENAI_API_KEY_OVERRIDE`; it is read into the per-user ZeroClaw config Secret as the provider API key and is not passed through as a normal shell environment variable.
+
+Commands:
+- `!token set` — opens a password-style Mattermost dialog for the personal API key.
+- `!token show` — shows whether a personal key is configured, with the value masked.
+- `!token reset` — removes the override and returns to the global key.
+
+Token changes are written into the per-user env Secret. The effective provider API key is rendered into the per-user ZeroClaw config Secret on the next runtime ensure.
 
 ---
 
@@ -285,7 +333,8 @@ All configuration is via environment variables or a `.env` file. Copy `.env.exam
 |---|---|---|---|
 | `OPENAI_API_KEY` | yes | — | API key stored in the Kubernetes Secret-mounted ZeroClaw config |
 | `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
-| `OPENAI_MODEL` | no | `gpt-4o-mini` | Model name |
+| `ALLOWED_MODELS` | yes | — | Comma-separated allowed model names. The first item is the default model. |
+| `ALLOWED_COMMANDS` | no | built-in allowlist | Comma-separated shell commands allowed by the ZeroClaw risk profile |
 
 ### ZeroClaw Sandbox Pods
 
