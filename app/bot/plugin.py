@@ -30,7 +30,7 @@ from app.bot.formatting import _CURSOR, patch_post
 from app.bot.stream_handler import StreamHandler
 from app.config import Settings
 from app.identity import object_name, session_id
-from app.k8s.lifecycle import LifecycleManager
+from app.k8s.controller import RuntimeController
 from app.k8s.skills import SkillManager
 from app.k8s.user_state import UserStateManager
 from app.zeroclaw.client import chat_stream
@@ -42,7 +42,7 @@ class ZeroClawPlugin(Plugin):
     def __init__(
         self,
         settings: Settings,
-        lifecycle: LifecycleManager,
+        lifecycle: RuntimeController,
         user_state: UserStateManager,
         skill_manager: SkillManager,
     ) -> None:
