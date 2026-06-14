@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import threading
 import time
@@ -16,7 +17,7 @@ from app.identity import (
     pvc_name,
     zeroclaw_config_secret_name,
 )
-from app.k8s.user_state import UserStateManager
+from app.k8s.user_state import TOKEN_KEY, UserStateManager
 from app.k8s.workspace import WORKSPACE_FILES, _workspace_default_data
 
 logger = logging.getLogger(__name__)
@@ -94,9 +95,10 @@ class LifecycleManager:
         env_keys = self._get_user_env_keys(mm_user_id)
         model = self._user_state.get_user_model(model_user_id or mm_user_id)
         autonomy = self._user_state.get_user_autonomy(mm_user_id)
+        api_key_override = self._user_state.get_user_token(mm_user_id)
         s = self._settings
         cname = zeroclaw_config_secret_name(self._secret, mm_user_id)
-        config_toml = self._zeroclaw_config_toml(env_keys, model, autonomy)
+        config_toml = self._zeroclaw_config_toml(env_keys, model, autonomy, api_key_override)
         try:
             self._core.patch_namespaced_secret(
                 cname,
@@ -160,12 +162,35 @@ class LifecycleManager:
             self._configmap_ensured = True
 
     def _zeroclaw_config_toml(
-        self, env_keys: list[str], model: str | None = None, autonomy: str = "full"
-    ) -> str:  # default kept as literal; only used by _ensure_provider_credentials_secret (no user)
+        self,
+        env_keys: list[str],
+        model: str | None = None,
+        autonomy: str = "full",
+        api_key_override: str | None = None,
+    ) -> str:
         s = self._settings
         effective_model = model or s.default_model
         doc: dict = {
-            "gateway": {"allow_public_bind": True},
+            "schema_version": 3,
+            "onboard_state": {
+                "quickstart_completed": True,
+                "completed_sections": [
+                    "model_provider",
+                    "risk_profile",
+                    "memory",
+                    "channels",
+                    "peer_groups",
+                    "identity",
+                ],
+            },
+            "agents": {
+                "default": {
+                    "model_provider": "openai.default",
+                    "risk_profile": "default",
+                    "runtime_profile": "default",
+                }
+            },
+            "gateway": {"allow_public_bind": True, "require_pairing": False},
             "observability": {
                 "backend": "log",
                 "log_persistence": "full",
@@ -175,13 +200,19 @@ class LifecycleManager:
             "scheduler": {"enabled": False},
             "browser": {"enabled": False},
             "cron": {"enabled": False, "catch_up_on_startup": False},
-            "autonomy": {
-                "level": autonomy,
-                "max_actions_per_hour": 100000,
-                "shell_env_passthrough": env_keys,
-                "allowed_commands": s.allowed_commands,
+            "risk_profiles": {
+                "default": {
+                    "level": autonomy,
+                    "allowed_commands": s.allowed_commands,
+                    "shell_env_passthrough": env_keys,
+                }
             },
-            "agent": {"max_tool_iterations": 150, "command_timeout": 180},
+            "runtime_profiles": {
+                "default": {
+                    "max_tool_iterations": 150,
+                    "max_actions_per_hour": 100000,
+                }
+            },
             "http_request": {"allow_private_hosts": True},
             "web_fetch": {
                 "allowed_domain": ["*"],
@@ -193,13 +224,15 @@ class LifecycleManager:
                 ],
             },
             "providers": {
-                "fallback": s.openai_base_url,
                 "models": {
-                    s.openai_base_url: {
-                        "model": effective_model,
-                        "api_key": s.openai_api_key,
+                    "openai": {
+                        "default": {
+                            "api_key": api_key_override or s.openai_api_key,
+                            "uri": s.openai_base_url,
+                            "model": effective_model,
+                        }
                     }
-                },
+                }
             },
         }
         return tomli_w.dumps(doc)
@@ -237,7 +270,7 @@ class LifecycleManager:
         sname = env_secret_name(self._secret, mm_user_id)
         try:
             sec = self._core.read_namespaced_secret(sname, self._ns)
-            return list((sec.data or {}).keys())
+            return sorted(k for k in (sec.data or {}).keys() if k != TOKEN_KEY)
         except client.exceptions.ApiException as exc:
             if exc.status == 404:
                 return []
@@ -257,6 +290,8 @@ class LifecycleManager:
         name = zeroclaw_config_secret_name(self._secret, mm_user_id)
         model = self._user_state.get_user_model(model_user_id or mm_user_id)
         autonomy = self._user_state.get_user_autonomy(mm_user_id)
+        api_key_override = self._user_state.get_user_token(mm_user_id)
+        config_toml = self._zeroclaw_config_toml(env_keys, model, autonomy, api_key_override)
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(
                 name=name,
@@ -264,9 +299,7 @@ class LifecycleManager:
                 labels=labels,
                 annotations=annotations,
             ),
-            string_data={
-                s.zeroclaw_config_key: self._zeroclaw_config_toml(env_keys, model, autonomy)
-            },
+            string_data={s.zeroclaw_config_key: config_toml},
         )
         try:
             self._core.read_namespaced_secret(name, self._ns)
@@ -280,6 +313,24 @@ class LifecycleManager:
                 name,
                 extra={"mm_user_id": mm_user_id},
             )
+        config_hash = hashlib.sha256(config_toml.encode()).hexdigest()[:12]
+        annotations["ai.relay.io/config-hash"] = config_hash
+        dep_name = object_name(self._secret, mm_user_id)
+        try:
+            self._apps.patch_namespaced_deployment(
+                dep_name,
+                self._ns,
+                {
+                    "spec": {
+                        "template": {
+                            "metadata": {"annotations": {"ai.relay.io/config-hash": config_hash}}
+                        }
+                    }
+                },
+            )
+        except client.exceptions.ApiException:
+            pass  # deployment may not exist yet on first ensure_all;
+            # annotation will be in the create body
 
     def _ensure_identity_configmap(self, mm_user_id: str, labels: dict, annotations: dict) -> None:
         """Create per-user identity ConfigMap pre-populated with global defaults, if absent."""
@@ -416,9 +467,7 @@ class LifecycleManager:
             args=["daemon", "--host", "0.0.0.0"],  # nosec B104
             image_pull_policy="IfNotPresent",
             ports=[client.V1ContainerPort(container_port=s.zeroclaw_port, protocol="TCP")],
-            env=[
-                client.V1EnvVar(name="ZEROCLAW_REQUIRE_PAIRING", value="false"),
-            ],
+            env=[],
             env_from=[
                 client.V1EnvFromSource(
                     secret_ref=client.V1SecretEnvSource(name=env_secret, optional=True)
@@ -427,7 +476,10 @@ class LifecycleManager:
             volume_mounts=[
                 client.V1VolumeMount(name="data", mount_path=s.zeroclaw_data_path),
                 client.V1VolumeMount(
-                    name="model-config", mount_path=s.zeroclaw_config_mount, read_only=True
+                    name="model-config",
+                    mount_path=f"{s.zeroclaw_config_mount}{s.zeroclaw_config_key}",
+                    sub_path=s.zeroclaw_config_key,
+                    read_only=True,
                 ),
                 *[
                     client.V1VolumeMount(

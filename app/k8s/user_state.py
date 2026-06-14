@@ -1,3 +1,4 @@
+import base64
 import logging
 from collections.abc import Callable
 
@@ -13,6 +14,7 @@ MODEL_KEY = "MODEL"
 AUTONOMY_KEY = "AUTONOMY"
 _AUTONOMY_LEVELS = ("full", "supervised")
 DEFAULT_AUTONOMY = "supervised"
+TOKEN_KEY = "OPENAI_API_KEY_OVERRIDE"
 
 
 class UserStateManager:
@@ -232,3 +234,26 @@ class UserStateManager:
                 return False
             metrics.k8s_errors_total.labels(op=metrics.K8S_OP_WORKSPACE_FILE_RESET).inc()
             raise
+
+    def get_user_token(self, mm_user_id: str) -> str | None:
+        sname = env_secret_name(self._secret, mm_user_id)
+        try:
+            secret = self._core.read_namespaced_secret(sname, self._ns)
+            data = secret.data
+            if not isinstance(data, dict):
+                return None
+            raw = data.get(TOKEN_KEY)
+            if not isinstance(raw, str):
+                return None
+            return base64.b64decode(raw).decode()
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return None
+            metrics.k8s_errors_total.labels(op=metrics.K8S_OP_TOKEN_GET).inc()
+            raise
+
+    def set_user_token(self, mm_user_id: str, token: str) -> None:
+        self.set_user_env(mm_user_id, TOKEN_KEY, token)
+
+    def reset_user_token(self, mm_user_id: str) -> bool:
+        return self.delete_user_env(mm_user_id, TOKEN_KEY)

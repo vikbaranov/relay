@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable
 
 from app import metrics
-from app.bot.formatting import patch_post, patch_props
+from app.bot.formatting import _clean_summary, patch_post, patch_props
 from app.types import ApprovalDecision
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ class ApprovalManager:
         channel_id: str,
         root_id: str,
         main_post_id: str,
+        user_text: str = "",
     ) -> dict:
         webhook_url = f"{self._base_url}/hooks/approval"
 
@@ -46,18 +47,22 @@ class ApprovalManager:
                 },
             }
 
+        clean = _clean_summary(summary)
+        text = f"**Подтверждение действия**\nИнструмент: `{tool}`\n```\n{clean}\n```"
+        if user_text:
+            short = user_text[:120] + "…" if len(user_text) > 120 else user_text
+            text = f"_В ответ на: «{short}»_\n{text}"
+
         return {
             "channel_id": channel_id,
             "root_id": root_id,
             "props": {
                 "attachments": [
                     {
-                        "text": (
-                            f"**Подтверждение действия**\nИнструмент: `{tool}`\n```\n{summary}\n```"
-                        ),
+                        "text": text,
                         "actions": [
                             _action("approve", "✅ Разрешить один раз", "approve"),
-                            _action("always", "✅ Всегда разрешать", "always"),
+                            _action("always", "⚡ Всегда разрешать", "always"),
                             _action("deny", "❌ Отклонить", "deny"),
                         ],
                     }
@@ -66,18 +71,23 @@ class ApprovalManager:
         }
 
     def request(
-        self, frame: dict, channel_id: str, root_id: str, main_post_id: str
+        self,
+        frame: dict,
+        channel_id: str,
+        root_id: str,
+        main_post_id: str,
+        user_text: str = "",
     ) -> ApprovalDecision:
         request_id = frame["request_id"]
         tool = frame["tool"]
         summary = frame.get("arguments_summary", "")
         timeout = frame.get("timeout_secs", 120)
 
-        patch_post(self._driver, main_post_id, "_Ожидание подтверждения..._")
+        patch_post(self._driver, main_post_id, "> ⏳ Ожидание подтверждения...")
 
         approval_post = self._driver.posts.create_post(
             options=self._build_payload(
-                request_id, tool, summary, channel_id, root_id, main_post_id
+                request_id, tool, summary, channel_id, root_id, main_post_id, user_text
             )
         )
         approval_post_id = approval_post["id"]
@@ -134,18 +144,6 @@ class ApprovalManager:
         pending["decision"] = decision
         pending["event"].set()
 
-        approval_post_id = pending.get("approval_post_id")
-        if approval_post_id:
-            try:
-                self._driver.posts.delete_post(approval_post_id)
-            except OSError:
-                logger.error(
-                    "approval_delete_failed request_id=%s post_id=%s",
-                    request_id,
-                    approval_post_id,
-                    exc_info=True,
-                )
-
         logger.info(
             "approval_decision request_id=%s tool=%s decision=%s user=%s",
             request_id,
@@ -156,18 +154,16 @@ class ApprovalManager:
 
         status = {
             "approve": "✅ Разрешено один раз",
-            "always": "✅ Всегда разрешено",
+            "always": "⚡ Всегда разрешено",
             "deny": "❌ Отклонено",
         }[decision]
+        clean = _clean_summary(summary)
         header = f"**Подтверждение действия**: `{tool}`"
-        if summary:
-            header += f"\n```\n{summary}\n```"
+        if clean:
+            header += f"\n```\n{clean}\n```"
+        # Collapse the approval post in-place (no delete → no "(message deleted)" gap)
         return {
             "update": {
-                "props": {
-                    "attachments": [
-                        {"text": f"{header}\n{status} пользователем @{event.user_name}"}
-                    ]
-                }
+                "props": {"attachments": [{"text": f"{header}\n{status} · @{event.user_name}"}]}
             }
         }

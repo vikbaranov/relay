@@ -1,4 +1,5 @@
 import logging
+import re
 from urllib.parse import urlparse
 
 _CURSOR = "▌"
@@ -8,6 +9,8 @@ _HEARTBEAT_INTERVAL = 10.0
 _MM_MAX_POST = 10_000
 _THINKING_PREVIEW_MAX = 400
 _THINKING_BUFFER_MAX = _THINKING_PREVIEW_MAX * 2
+
+_APPROVED_PREFIX = re.compile(r"^approved:\s*(?:true|false),\s*", re.IGNORECASE)
 
 _TOOL_ICONS: dict[str, str] = {
     "web_search_tool": "🔍",
@@ -34,6 +37,11 @@ _TOOL_ICONS: dict[str, str] = {
 _TOOL_ICON_DEFAULT = "⚙️"
 
 
+def _clean_summary(summary: str) -> str:
+    """Strip 'approved: false/true, ' prefix injected by the approval wrapper."""
+    return _APPROVED_PREFIX.sub("", summary).strip()
+
+
 def _truncate(s: str, n: int) -> str:
     return s[: n - 3] + "..." if len(s) > n else s
 
@@ -54,11 +62,12 @@ def _key_arg(name: str, args: dict | None) -> str:
     return _truncate(s, 80)
 
 
-def _fmt_tool_running(name: str, key: str) -> str:
+def _fmt_tool_running(name: str, key: str, n: int = 0) -> str:
     icon = _TOOL_ICONS.get(name, _TOOL_ICON_DEFAULT)
+    prefix = f"[{n}] " if n else ""
     if key:
-        return f"_{icon} `{name}`: {key}..._"
-    return f"_{icon} `{name}`..._"
+        return f"_{prefix}{icon} `{name}`: {key}..._"
+    return f"_{prefix}{icon} `{name}`..._"
 
 
 logger = logging.getLogger(__name__)
@@ -77,7 +86,9 @@ def patch_props(driver, post_id: str, text: str) -> None:
     driver.posts.patch_post(post_id, {"props": {"attachments": [{"text": text}]}})
 
 
-def _fmt_tool_done(name: str, key: str, output: str) -> str:
+def _fmt_tool_done(
+    name: str, key: str, output: str, n: int = 0, elapsed: float | None = None
+) -> str:
     icon = _TOOL_ICONS.get(name, _TOOL_ICON_DEFAULT)
     out = output.strip()
     if "no results found" in out.lower():
@@ -86,6 +97,12 @@ def _fmt_tool_done(name: str, key: str, output: str) -> str:
         summary = _truncate(out, _RESULT_MAX)
     else:
         summary = out
+    prefix = f"[{n}] " if n else ""
+    time_str = f" ({elapsed:.1f}с)" if elapsed is not None else ""
     if key:
-        return f"_{icon} `{name}`: {key} → {summary}_"
-    return f"_{icon} `{name}` → {summary}_"
+        call_line = f"_{prefix}{icon} `{name}`: {key}{time_str}_"
+    else:
+        call_line = f"_{prefix}{icon} `{name}`{time_str}_"
+    if summary:
+        return f"{call_line}\n_→ {summary}_"
+    return call_line
