@@ -29,7 +29,7 @@ dev = [
     "ruff>=0.15.17",
     "mypy>=1.10",
     "bandit>=1.8",
-    "pip-audit>=2.7",
+    "pip-audit>=2.10.1",
     "pre-commit>=3.7",
 ]
 
