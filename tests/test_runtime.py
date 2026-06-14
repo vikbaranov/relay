@@ -1,5 +1,6 @@
 """LifecycleManager and UserStateManager unit tests with mocked K8s clients."""
 
+import base64
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -261,8 +262,8 @@ class TestEnsureRuntime:
         all_creates = [call[0][1] for call in core.create_namespaced_secret.call_args_list]
         user_config = next(s for s in all_creates if s.metadata.name == expected_name)
         config_toml = user_config.string_data["config.toml"]
-        assert 'fallback = "custom:https://example.test/v1"' in config_toml
-        assert '[providers.models."custom:https://example.test/v1"]' in config_toml
+        assert "[providers.models.openai.default]" in config_toml
+        assert 'uri = "custom:https://example.test/v1"' in config_toml
         assert 'model = "gpt-4o-mini"' in config_toml
         assert 'api_key = "sk-secret-fixture"' in config_toml
 
@@ -350,6 +351,7 @@ class TestEnsureRuntime:
         core.read_namespaced_secret.side_effect = [
             k8s_client.exceptions.ApiException(status=404),  # provider credentials → create
             env_secret,  # user env keys read
+            env_secret,  # get_user_token read (no TOKEN_KEY → no override)
             k8s_client.exceptions.ApiException(status=404),  # user zc-config → create
         ]
         existing_deploy = MagicMock()
@@ -787,3 +789,139 @@ class TestWorkspaceFiles:
         _, _, body = core.patch_namespaced_config_map.call_args[0]
         assert body["data"]["AUTONOMY"] is None
         apps.patch_namespaced_deployment.assert_called_once()
+
+
+class TestUserStateToken:
+    def test_get_user_token_returns_none_when_secret_missing(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        core.read_namespaced_secret.side_effect = k8s_client.exceptions.ApiException(status=404)
+
+        assert user_state.get_user_token("user1") is None
+
+    def test_get_user_token_returns_none_when_key_absent(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        secret = MagicMock()
+        secret.data = {"OTHER_KEY": base64.b64encode(b"value").decode()}
+        core.read_namespaced_secret.return_value = secret
+
+        assert user_state.get_user_token("user1") is None
+
+    def test_get_user_token_decodes_base64_value(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        secret = MagicMock()
+        secret.data = {"OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-test-key").decode()}
+        core.read_namespaced_secret.return_value = secret
+
+        assert user_state.get_user_token("user1") == "sk-test-key"
+
+    def test_set_user_token_patches_secret_with_string_data(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+
+        user_state.set_user_token("user1", "sk-my-key")
+
+        first_body = core.patch_namespaced_secret.call_args_list[0][0][2]
+        assert first_body == {"stringData": {"OPENAI_API_KEY_OVERRIDE": "sk-my-key"}}
+
+    def test_reset_user_token_returns_false_when_key_absent(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        secret = MagicMock()
+        secret.data = {}
+        core.read_namespaced_secret.return_value = secret
+
+        assert user_state.reset_user_token("user1") is False
+
+    def test_reset_user_token_deletes_key_and_returns_true(self):
+        _, user_state, core, _ = _make_lifecycle_and_state()
+        secret = MagicMock()
+        secret.data = {"OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-key").decode()}
+        core.read_namespaced_secret.return_value = secret
+
+        result = user_state.reset_user_token("user1")
+
+        assert result is True
+        # delete_user_env patches data key to None
+        patch_calls = [c for c in core.patch_namespaced_secret.call_args_list]
+        assert any(c[0][2] == {"data": {"OPENAI_API_KEY_OVERRIDE": None}} for c in patch_calls)
+
+
+class TestZeroclawConfigTokenOverride:
+    def test_config_toml_uses_global_key_when_no_override(self):
+        import tomllib
+
+        lifecycle, _, _, _ = _make_lifecycle_and_state(
+            _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
+        )
+
+        toml_str = lifecycle._zeroclaw_config_toml([], api_key_override=None)
+        doc = tomllib.loads(toml_str)
+
+        assert doc["providers"]["models"]["openai"]["default"]["api_key"] == "sk-global"
+
+    def test_config_toml_uses_override_key_when_provided(self):
+        import tomllib
+
+        lifecycle, _, _, _ = _make_lifecycle_and_state(
+            _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
+        )
+
+        toml_str = lifecycle._zeroclaw_config_toml([], api_key_override="sk-user-override")
+        doc = tomllib.loads(toml_str)
+
+        assert doc["providers"]["models"]["openai"]["default"]["api_key"] == "sk-user-override"
+
+    def test_get_user_env_keys_excludes_token_key(self):
+        import base64
+
+        lifecycle, _, core, _ = _make_lifecycle_and_state()
+        secret = MagicMock()
+        secret.data = {
+            "MY_VAR": base64.b64encode(b"val").decode(),
+            "OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-key").decode(),
+        }
+        core.read_namespaced_secret.return_value = secret
+
+        keys = lifecycle._get_user_env_keys("user1")
+
+        assert "OPENAI_API_KEY_OVERRIDE" not in keys
+        assert "MY_VAR" in keys
+
+    def test_ensure_user_zeroclaw_config_passes_token_override_to_toml(self):
+        import base64
+        import tomllib
+
+        lifecycle, user_state, core, _ = _make_lifecycle_and_state(
+            _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
+        )
+        # user has a token override stored in env secret
+        env_secret = MagicMock()
+        env_secret.data = {"OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-user").decode()}
+        # identity configmap has no model/autonomy override
+        cm = MagicMock()
+        cm.data = {}
+        core.read_namespaced_config_map.return_value = cm
+        # make read_namespaced_secret return env_secret for all calls
+        core.read_namespaced_secret.return_value = env_secret
+
+        lifecycle._ensure_user_zeroclaw_config("user1", [], {}, {})
+
+        replace_call = core.replace_namespaced_secret.call_args
+        body = replace_call[0][2]
+        toml_str = body.string_data["config.toml"]
+        doc = tomllib.loads(toml_str)
+        assert doc["providers"]["models"]["openai"]["default"]["api_key"] == "sk-user"
+
+    def test_restart_if_running_passes_token_override_to_toml(self):
+        import tomllib
+
+        lifecycle, _, core, apps = _make_lifecycle_and_state(
+            _settings(openai_api_key="sk-global", openai_base_url="https://api.openai.com/v1")
+        )
+        env_secret = MagicMock()
+        env_secret.data = {"OPENAI_API_KEY_OVERRIDE": base64.b64encode(b"sk-user").decode()}
+        core.read_namespaced_secret.return_value = env_secret
+
+        lifecycle.restart_if_running("user1")
+
+        config_toml = core.patch_namespaced_secret.call_args[0][2]["stringData"]["config.toml"]
+        doc = tomllib.loads(config_toml)
+        assert doc["providers"]["models"]["openai"]["default"]["api_key"] == "sk-user"

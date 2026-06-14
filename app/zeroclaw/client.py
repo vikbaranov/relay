@@ -17,44 +17,57 @@ async def _chat_stream_async(
     text: str,
     on_approval_request: Callable[[dict], ApprovalDecision] | None = None,
 ):
-    async with websockets.connect(
-        ws_url,
-        ping_interval=20,
-        ping_timeout=20,
-        open_timeout=30,
-        close_timeout=10,
-    ) as ws:
-        await ws.send(json.dumps({"type": "message", "content": text}))
-        async for raw in ws:
-            frame = json.loads(raw)
-            ftype = frame.get("type")
-            if ftype not in ("chunk",):
-                logger.debug("ws_rx type=%s frame=%s", ftype, frame)
-            if ftype == "approval_request" and on_approval_request is not None:
-                loop = asyncio.get_running_loop()
-                t0 = loop.time()
-                logger.info(
-                    "approval_request received request_id=%s timeout_secs=%s tool=%s",
-                    frame.get("request_id"),
-                    frame.get("timeout_secs"),
-                    frame.get("tool"),
-                )
-                decision = await loop.run_in_executor(None, on_approval_request, frame)
-                logger.info(
-                    "approval_response sending decision=%s elapsed=%.1fs request_id=%s",
-                    decision,
-                    loop.time() - t0,
-                    frame.get("request_id"),
-                )
-                response = {
-                    "type": "approval_response",
-                    "request_id": frame.get("request_id"),
-                    "decision": decision,
-                }
-                await ws.send(json.dumps(response))
-            yield frame
-            if ftype in ("done", "error"):
-                break
+    logger.debug("ws_connect url=%s", ws_url)
+    try:
+        async with websockets.connect(
+            ws_url,
+            ping_interval=20,
+            ping_timeout=20,
+            open_timeout=30,
+            close_timeout=10,
+        ) as ws:
+            await ws.send(json.dumps({"type": "message", "content": text}))
+            async for raw in ws:
+                frame = json.loads(raw)
+                ftype = frame.get("type")
+                if ftype not in ("chunk",):
+                    logger.debug("ws_rx type=%s frame=%s", ftype, frame)
+                if ftype == "approval_request" and on_approval_request is not None:
+                    loop = asyncio.get_running_loop()
+                    t0 = loop.time()
+                    logger.info(
+                        "approval_request received request_id=%s timeout_secs=%s tool=%s",
+                        frame.get("request_id"),
+                        frame.get("timeout_secs"),
+                        frame.get("tool"),
+                    )
+                    decision = await loop.run_in_executor(None, on_approval_request, frame)
+                    logger.info(
+                        "approval_response sending decision=%s elapsed=%.1fs request_id=%s",
+                        decision,
+                        loop.time() - t0,
+                        frame.get("request_id"),
+                    )
+                    response = {
+                        "type": "approval_response",
+                        "request_id": frame.get("request_id"),
+                        "decision": decision,
+                    }
+                    await ws.send(json.dumps(response))
+                yield frame
+                if ftype in ("done", "error"):
+                    break
+    except websockets.exceptions.InvalidStatus as exc:
+        resp = exc.response
+        body = bytes(resp.body).decode("utf-8", errors="replace") if resp.body else ""
+        logger.error(
+            "ws_handshake_rejected status=%d body=%r www_authenticate=%r response_headers=%s",
+            resp.status_code,
+            body,
+            resp.headers.get("www-authenticate"),
+            dict(resp.headers),
+        )
+        raise
 
 
 def chat_stream(

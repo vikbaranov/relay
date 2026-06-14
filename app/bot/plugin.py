@@ -17,9 +17,15 @@ from app.bot.commands import (
     SessionCommandHandler,
     SessionState,
     SkillCommandHandler,
+    TokenCommandHandler,
     WorkspaceFileCommandHandler,
 )
-from app.bot.dialogs import EnvDialogHandler, SkillDialogHandler, WorkspaceDialogHandler
+from app.bot.dialogs import (
+    EnvDialogHandler,
+    SkillDialogHandler,
+    TokenDialogHandler,
+    WorkspaceDialogHandler,
+)
 from app.bot.formatting import _CURSOR, patch_post
 from app.bot.stream_handler import StreamHandler
 from app.config import Settings
@@ -82,6 +88,11 @@ class ZeroClawPlugin(Plugin):
                 get_driver=lambda: self.driver,
                 user_state=user_state,
             ),
+            token=TokenCommandHandler(
+                get_driver=lambda: self.driver,
+                base_url=self._base_url,
+                user_state=user_state,
+            ),
         )
         self._workspace_dialog = WorkspaceDialogHandler(
             get_driver=lambda: self.driver,
@@ -96,6 +107,11 @@ class ZeroClawPlugin(Plugin):
         self._skill_dialog = SkillDialogHandler(
             get_driver=lambda: self.driver,
             skill_manager=skill_manager,
+            base_url=self._base_url,
+        )
+        self._token_dialog = TokenDialogHandler(
+            get_driver=lambda: self.driver,
+            user_state=user_state,
             base_url=self._base_url,
         )
 
@@ -149,6 +165,14 @@ class ZeroClawPlugin(Plugin):
     def handle_skill_create_submit(self, event: ActionEvent) -> None:
         self._skill_dialog.submit(event)
 
+    @listen_webhook("token_set_dialog")
+    def handle_token_set_dialog(self, event: ActionEvent) -> None:
+        self._token_dialog.open(event)
+
+    @listen_webhook("token_set_submit")
+    def handle_token_set_submit(self, event: ActionEvent) -> None:
+        self._token_dialog.submit(event)
+
     # ── streaming ──────────────────────────────────────────────────────────────
 
     def _run_stream(
@@ -165,7 +189,7 @@ class ZeroClawPlugin(Plugin):
     ) -> None:
         state = self._sessions.setdefault(scope, SessionState())
         sid = session_id(scope, state.generation)
-        ws_url = f"ws://{service_dns}:{self._settings.zeroclaw_port}/ws/chat?session_id={sid}"
+        ws_url = f"ws://{service_dns}:{self._settings.zeroclaw_port}/ws/chat?session_id={sid}&agent=default"
         extra["session_id"] = sid
 
         def _on_approval_request(frame: dict) -> ApprovalDecision:
@@ -185,7 +209,9 @@ class ZeroClawPlugin(Plugin):
         metrics.active_clients.inc()
         try:
             for frame in chat_stream(
-                ws_url, message.text, on_approval_request=_on_approval_request
+                ws_url,
+                message.text,
+                on_approval_request=_on_approval_request,
             ):
                 if stop_event.is_set():
                     break
@@ -193,7 +219,7 @@ class ZeroClawPlugin(Plugin):
                     break
             else:
                 handler.handle_stream_end(rkey)
-        except RuntimeError, OSError:
+        except Exception:
             metrics.messages_total.labels(outcome="error").inc()
             metrics.message_duration.labels(outcome="error").observe(time.monotonic() - t0)
             logger.exception("zeroclaw chat failed for %s", rkey, extra=extra)

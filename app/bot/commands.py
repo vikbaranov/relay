@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from mmpy_bot.wrappers import Message
 
 from app.k8s.skills import SKILL_NAME_RE, PodNotRunningError, SkillError, SkillManager
-from app.k8s.user_state import UserStateManager
+from app.k8s.user_state import TOKEN_KEY, UserStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,13 @@ class EnvCommandHandler(_DriverMixin):
                     root_id=root_id,
                 )
                 return
+            if key == TOKEN_KEY:
+                self._driver.create_post(
+                    channel_id=message.channel_id,
+                    message=f"Переменная `{key}` зарезервирована. Используйте `!token set`.",
+                    root_id=root_id,
+                )
+                return
             self._driver.posts.create_post(
                 options={
                     "channel_id": message.channel_id,
@@ -132,7 +139,7 @@ class EnvCommandHandler(_DriverMixin):
 
         if sub == "list":
             try:
-                keys = self._user_state.list_user_envs(pod_key)
+                keys = [k for k in self._user_state.list_user_envs(pod_key) if k != TOKEN_KEY]
                 reply = (
                     ("Переменные окружения:\n" + "\n".join(f"- `{k}`" for k in keys))
                     if keys
@@ -146,6 +153,13 @@ class EnvCommandHandler(_DriverMixin):
 
         if sub == "del" and len(parts) == 3:
             key = parts[2]
+            if key == TOKEN_KEY:
+                self._driver.create_post(
+                    channel_id=message.channel_id,
+                    message=f"Переменная `{key}` зарезервирована. Используйте `!token reset`.",
+                    root_id=root_id,
+                )
+                return
             try:
                 found = self._user_state.delete_user_env(pod_key, key)
                 reply = (
@@ -539,6 +553,93 @@ class AutonomyCommandHandler(_DriverMixin):
         )
 
 
+class TokenCommandHandler(_DriverMixin):
+    USAGE = (
+        "- `!token set` — задать персональный API-ключ\n"
+        "- `!token show` — показать статус ключа\n"
+        "- `!token reset` — сбросить к глобальному ключу"
+    )
+
+    def __init__(
+        self,
+        get_driver: Callable,
+        base_url: str,
+        user_state: UserStateManager,
+    ) -> None:
+        self._get_driver = get_driver
+        self._base_url = base_url
+        self._user_state = user_state
+
+    def handle(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
+        pod_key = runtime_key or message.user_id
+        parts = message.text.strip().split(maxsplit=1)
+        sub = parts[1].lower() if len(parts) > 1 else "show"
+
+        if sub == "show":
+            try:
+                token = self._user_state.get_user_token(pod_key)
+                if token:
+                    masked = f"{token[:3]}...{token[-4:]}" if len(token) >= 7 else "***"
+                    reply = f"API-ключ установлен: `{masked}`"
+                else:
+                    reply = "API-ключ не установлен — используется глобальный."
+            except Exception:
+                logger.exception("token_show_failed", extra={"mm_user_id": pod_key})
+                reply = "Ошибка при получении статуса ключа."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        if sub == "set":
+            self._driver.posts.create_post(
+                options={
+                    "channel_id": message.channel_id,
+                    "root_id": root_id,
+                    "props": {
+                        "attachments": [
+                            {
+                                "text": "Нажмите кнопку для ввода API-ключа:",
+                                "actions": [
+                                    {
+                                        "id": "trigger",
+                                        "name": "🔒 Ввести ключ",
+                                        "type": "button",
+                                        "integration": {
+                                            "url": f"{self._base_url}/hooks/token_set_dialog",
+                                            "context": {
+                                                "pod_key": pod_key,
+                                                "root_id": root_id,
+                                            },
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                }
+            )
+            return
+
+        if sub == "reset":
+            try:
+                found = self._user_state.reset_user_token(pod_key)
+                reply = (
+                    "✅ API-ключ сброшен. Используется глобальный ключ. Сессия будет перезапущена."
+                    if found
+                    else "Персональный API-ключ не был установлен."
+                )
+            except Exception:
+                logger.exception("token_reset_failed", extra={"mm_user_id": pod_key})
+                reply = "Ошибка при сбросе API-ключа."
+            self._driver.create_post(channel_id=message.channel_id, message=reply, root_id=root_id)
+            return
+
+        self._driver.create_post(
+            channel_id=message.channel_id,
+            message=f"Использование:\n{TokenCommandHandler.USAGE}",
+            root_id=root_id,
+        )
+
+
 class HelpCommandHandler(_DriverMixin):
     def __init__(self, get_driver: Callable, user_state: UserStateManager) -> None:
         self._get_driver = get_driver
@@ -570,6 +671,9 @@ class HelpCommandHandler(_DriverMixin):
                 "**Автономность**\n"
                 f"{AutonomyCommandHandler.usage(default)}\n"
                 "\n"
+                "**Токен**\n"
+                f"{TokenCommandHandler.USAGE}\n"
+                "\n"
                 "- `!help` — показать эту справку"
             ),
             root_id=root_id,
@@ -586,6 +690,7 @@ class CommandHandler:
         workspace: WorkspaceFileCommandHandler,
         skill: SkillCommandHandler,
         autonomy: AutonomyCommandHandler,
+        token: TokenCommandHandler,
     ) -> None:
         self._help = help
         self._session = session
@@ -594,6 +699,7 @@ class CommandHandler:
         self._workspace = workspace
         self._skill = skill
         self._autonomy = autonomy
+        self._token = token
 
     def handle(
         self, message: Message, scope: str, root_id: str, runtime_key: str | None = None
@@ -629,6 +735,10 @@ class CommandHandler:
 
         if command == "!autonomy":
             self._autonomy.handle(message, root_id, runtime_key)
+            return True
+
+        if command == "!token":
+            self._token.handle(message, root_id, runtime_key)
             return True
 
         return False

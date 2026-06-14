@@ -268,3 +268,78 @@ class SkillDialogHandler:
         else:
             self._driver.create_post(channel_id=ctx.channel_id, message=result, root_id=ctx.root_id)
         self._driver.respond_to_web(event, {})
+
+
+class TokenDialogHandler:
+    def __init__(self, get_driver: Callable, user_state: UserStateManager, base_url: str) -> None:
+        self._get_driver = get_driver
+        self._user_state = user_state
+        self._base_url = base_url
+
+    @property
+    def _driver(self):
+        return self._get_driver()
+
+    def open(self, event) -> None:
+        context = event.context or {}
+        pod_key = context.get("pod_key", "")
+        root_id = context.get("root_id", "")
+        state = json.dumps(
+            {
+                "pod_key": pod_key,
+                "root_id": root_id,
+                "prompt_post_id": event.post_id or "",
+            }
+        )
+        self._driver.integration_actions.open_interactive_dialog(
+            {
+                "trigger_id": event.trigger_id,
+                "url": f"{self._base_url}/hooks/token_set_submit",
+                "dialog": {
+                    "title": "Установить API-ключ",
+                    "submit_label": "Сохранить",
+                    "notify_on_cancel": True,
+                    "state": state,
+                    "elements": [
+                        {
+                            "display_name": "API-ключ",
+                            "name": "value",
+                            "type": "text",
+                            "subtype": "password",
+                            "placeholder": "Введите API-ключ...",
+                        }
+                    ],
+                },
+            }
+        )
+        self._driver.respond_to_web(event, {})
+
+    def submit(self, event) -> None:
+        body = event.body
+        state, ctx = _parse_submit(body)
+
+        if body.get("cancelled"):
+            if ctx.prompt_post_id:
+                patch_props(self._driver, ctx.prompt_post_id, "❌ Ввод API-ключа отменён.")
+            self._driver.respond_to_web(event, {})
+            return
+
+        value = (body.get("submission") or {}).get("value", "")
+        if not value:
+            self._driver.respond_to_web(
+                event, {"errors": {"value": "API-ключ не может быть пустым."}}
+            )
+            return
+
+        try:
+            self._user_state.set_user_token(ctx.pod_key, value)
+            result = "✅ API-ключ сохранён. Сессия будет перезапущена автоматически."
+        except Exception:
+            logger.exception("token_set_failed", extra={"mm_user_id": ctx.pod_key})
+            result = "❌ Ошибка при сохранении API-ключа."
+
+        if ctx.prompt_post_id:
+            patch_props(self._driver, ctx.prompt_post_id, result)
+        else:
+            self._driver.create_post(channel_id=ctx.channel_id, message=result, root_id=ctx.root_id)
+        self._driver.respond_to_web(event, {})
