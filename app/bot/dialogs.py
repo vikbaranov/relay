@@ -29,10 +29,17 @@ def _parse_submit(body: dict) -> tuple[dict, _SubmitContext]:
 
 
 class WorkspaceDialogHandler:
-    def __init__(self, get_driver: Callable, user_state: UserStateManager, base_url: str) -> None:
+    def __init__(
+        self,
+        get_driver: Callable,
+        user_state: UserStateManager,
+        base_url: str,
+        restart_fn: Callable[[str], None],
+    ) -> None:
         self._get_driver = get_driver
         self._user_state = user_state
         self._base_url = base_url
+        self._restart = restart_fn
 
     @property
     def _driver(self):
@@ -97,6 +104,7 @@ class WorkspaceDialogHandler:
 
         try:
             self._user_state.set_workspace_file(ctx.pod_key, filename, content)
+            self._restart(ctx.pod_key)
             result = f"✅ `{filename}` сохранён. Сессия будет перезапущена автоматически."
         except Exception:
             logger.exception(
@@ -112,10 +120,17 @@ class WorkspaceDialogHandler:
 
 
 class EnvDialogHandler:
-    def __init__(self, get_driver: Callable, user_state: UserStateManager, base_url: str) -> None:
+    def __init__(
+        self,
+        get_driver: Callable,
+        user_state: UserStateManager,
+        base_url: str,
+        restart_fn: Callable[[str], None],
+    ) -> None:
         self._get_driver = get_driver
         self._user_state = user_state
         self._base_url = base_url
+        self._restart = restart_fn
 
     @property
     def _driver(self):
@@ -177,6 +192,7 @@ class EnvDialogHandler:
 
         try:
             self._user_state.set_user_env(ctx.pod_key, key, value)
+            self._restart(ctx.pod_key)
             result = f"✅ `{key}` сохранён. Сессия будет перезапущена автоматически."
         except Exception:
             logger.exception("env_set_failed key=%s", key, extra={"mm_user_id": ctx.pod_key})
@@ -271,10 +287,17 @@ class SkillDialogHandler:
 
 
 class TokenDialogHandler:
-    def __init__(self, get_driver: Callable, user_state: UserStateManager, base_url: str) -> None:
+    def __init__(
+        self,
+        get_driver: Callable,
+        user_state: UserStateManager,
+        base_url: str,
+        restart_fn: Callable[[str], None],
+    ) -> None:
         self._get_driver = get_driver
         self._user_state = user_state
         self._base_url = base_url
+        self._restart = restart_fn
 
     @property
     def _driver(self):
@@ -333,6 +356,7 @@ class TokenDialogHandler:
 
         try:
             self._user_state.set_user_token(ctx.pod_key, value)
+            self._restart(ctx.pod_key)
             result = "✅ API-ключ сохранён. Сессия будет перезапущена автоматически."
         except Exception:
             logger.exception("token_set_failed", extra={"mm_user_id": ctx.pod_key})

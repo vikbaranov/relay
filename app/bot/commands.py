@@ -81,10 +81,12 @@ class EnvCommandHandler(_DriverMixin):
         get_driver: Callable,
         base_url: str,
         user_state: UserStateManager,
+        restart_fn: Callable[[str], None],
     ) -> None:
         self._get_driver = get_driver
         self._base_url = base_url
         self._user_state = user_state
+        self._restart = restart_fn
 
     def handle(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
         pod_key = runtime_key or message.user_id
@@ -162,6 +164,8 @@ class EnvCommandHandler(_DriverMixin):
                 return
             try:
                 found = self._user_state.delete_user_env(pod_key, key)
+                if found:
+                    self._restart(pod_key)
                 reply = (
                     f"✅ `{key}` удалён. Сессия будет перезапущена."
                     if found
@@ -193,10 +197,12 @@ class ModelCommandHandler(_DriverMixin):
         get_driver: Callable,
         user_state: UserStateManager,
         allowed_models: list[str],
+        restart_fn: Callable[[str], None],
     ) -> None:
         self._get_driver = get_driver
         self._user_state = user_state
         self._allowed_models = allowed_models
+        self._restart = restart_fn
 
     def handle(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
         pod_key = runtime_key or message.user_id
@@ -232,6 +238,7 @@ class ModelCommandHandler(_DriverMixin):
             try:
                 saved = self._user_state.set_user_model(pod_key, model)
                 if saved:
+                    self._restart(pod_key)
                     reply = f"✅ Модель `{model}` сохранена. Сессия будет перезапущена."
                 else:
                     reply = f"Модель `{model}` недоступна. Доступные модели: " + ", ".join(
@@ -246,6 +253,8 @@ class ModelCommandHandler(_DriverMixin):
         if sub == "reset":
             try:
                 changed = self._user_state.reset_user_model(pod_key)
+                if changed:
+                    self._restart(pod_key)
                 reply = (
                     f"✅ Модель сброшена к `{allowed[0]}`. Сессия будет перезапущена."
                     if changed
@@ -270,10 +279,12 @@ class WorkspaceFileCommandHandler(_DriverMixin):
         get_driver: Callable,
         base_url: str,
         user_state: UserStateManager,
+        restart_fn: Callable[[str], None],
     ) -> None:
         self._get_driver = get_driver
         self._base_url = base_url
         self._user_state = user_state
+        self._restart = restart_fn
 
     @staticmethod
     def usage(cmd: str) -> str:
@@ -338,6 +349,8 @@ class WorkspaceFileCommandHandler(_DriverMixin):
         if sub == "reset":
             try:
                 found = self._user_state.reset_workspace_file(pod_key, filename)
+                if found:
+                    self._restart(pod_key)
                 reply = (
                     f"✅ `{filename}` был сброшен. Сессия будет перезапущена."
                     if found
@@ -483,9 +496,15 @@ class SkillCommandHandler(_DriverMixin):
 
 
 class AutonomyCommandHandler(_DriverMixin):
-    def __init__(self, get_driver: Callable, user_state: UserStateManager) -> None:
+    def __init__(
+        self,
+        get_driver: Callable,
+        user_state: UserStateManager,
+        restart_fn: Callable[[str], None],
+    ) -> None:
         self._get_driver = get_driver
         self._user_state = user_state
+        self._restart = restart_fn
 
     @staticmethod
     def usage(default: str) -> str:
@@ -517,6 +536,7 @@ class AutonomyCommandHandler(_DriverMixin):
             try:
                 saved = self._user_state.set_user_autonomy(pod_key, level)
                 if saved:
+                    self._restart(pod_key)
                     reply = (
                         f"✅ Уровень автономности `{level}` сохранён. Сессия будет перезапущена."
                     )
@@ -535,6 +555,8 @@ class AutonomyCommandHandler(_DriverMixin):
         if sub == "reset":
             try:
                 changed = self._user_state.reset_user_autonomy(pod_key)
+                if changed:
+                    self._restart(pod_key)
                 reply = (
                     f"✅ Уровень автономности сброшен к `{default}`. Сессия будет перезапущена."
                     if changed
@@ -565,10 +587,12 @@ class TokenCommandHandler(_DriverMixin):
         get_driver: Callable,
         base_url: str,
         user_state: UserStateManager,
+        restart_fn: Callable[[str], None],
     ) -> None:
         self._get_driver = get_driver
         self._base_url = base_url
         self._user_state = user_state
+        self._restart = restart_fn
 
     def handle(self, message: Message, root_id: str, runtime_key: str | None = None) -> None:
         pod_key = runtime_key or message.user_id
@@ -622,6 +646,8 @@ class TokenCommandHandler(_DriverMixin):
         if sub == "reset":
             try:
                 found = self._user_state.reset_user_token(pod_key)
+                if found:
+                    self._restart(pod_key)
                 reply = (
                     "✅ API-ключ сброшен. Используется глобальный ключ. Сессия будет перезапущена."
                     if found

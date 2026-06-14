@@ -6,13 +6,13 @@ import time
 
 from app import metrics
 from app.config import Settings
-from app.k8s.lifecycle import LifecycleManager
+from app.k8s.controller import RuntimeController
 
 logger = logging.getLogger(__name__)
 
 
 class IdleReaper(threading.Thread):
-    def __init__(self, lifecycle: LifecycleManager, settings: Settings) -> None:
+    def __init__(self, lifecycle: RuntimeController, settings: Settings) -> None:
         super().__init__(daemon=True, name="idle-reaper")
         self._lifecycle = lifecycle
         self._settings = settings

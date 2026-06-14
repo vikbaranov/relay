@@ -8,7 +8,9 @@ from app import health
 from app.bot.plugin import ZeroClawPlugin
 from app.config import Settings
 from app.k8s.client import build_k8s_clients
-from app.k8s.lifecycle import LifecycleManager
+from app.k8s.config import ZeroClawConfigBuilder
+from app.k8s.controller import RuntimeController
+from app.k8s.provisioner import ResourceProvisioner
 from app.k8s.reaper import IdleReaper
 from app.k8s.skills import SkillManager
 from app.k8s.user_state import UserStateManager
@@ -29,16 +31,32 @@ def run_bot(settings: Settings) -> None:
     secret = settings.k8s_name_secret.encode()
     ns = settings.k8s_namespace
 
-    lifecycle = LifecycleManager(settings=settings, core=core, apps=apps, secret=secret, ns=ns)
+    config_builder = ZeroClawConfigBuilder(settings)
+    provisioner = ResourceProvisioner(
+        settings=settings,
+        core=core,
+        apps=apps,
+        secret=secret,
+        ns=ns,
+        config_builder=config_builder,
+    )
     user_state = UserStateManager(
         core=core,
         apps=apps,
         secret=secret,
         ns=ns,
-        restart_fn=lifecycle.restart_if_running,
         allowed_models=settings.allowed_models,
     )
-    lifecycle.set_user_state(user_state)
+    controller = RuntimeController(
+        settings=settings,
+        core=core,
+        apps=apps,
+        secret=secret,
+        ns=ns,
+        provisioner=provisioner,
+        user_state=user_state,
+        config_builder=config_builder,
+    )
     skill_manager = SkillManager(
         core=core,
         secret=secret,
@@ -46,12 +64,12 @@ def run_bot(settings: Settings) -> None:
         workspace_path=settings.zeroclaw_data_path,
     )
 
-    reaper = IdleReaper(lifecycle=lifecycle, settings=settings)
+    reaper = IdleReaper(lifecycle=controller, settings=settings)
     reaper.start()
 
     plugin = ZeroClawPlugin(
         settings=settings,
-        lifecycle=lifecycle,
+        lifecycle=controller,
         user_state=user_state,
         skill_manager=skill_manager,
     )

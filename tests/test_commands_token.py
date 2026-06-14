@@ -8,12 +8,14 @@ from app.bot.commands import TokenCommandHandler
 def _make_handler():
     driver = MagicMock()
     user_state = MagicMock()
+    restart_fn = MagicMock()
     handler = TokenCommandHandler(
         get_driver=lambda: driver,
         base_url="http://localhost:8579",
         user_state=user_state,
+        restart_fn=restart_fn,
     )
-    return handler, driver, user_state
+    return handler, driver, user_state, restart_fn
 
 
 def _msg(text, user_id="user1", channel_id="ch1"):
@@ -26,7 +28,7 @@ def _msg(text, user_id="user1", channel_id="ch1"):
 
 class TestTokenCommandHandlerShow:
     def test_show_reports_not_set_when_no_override(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
         user_state.get_user_token.return_value = None
 
         handler.handle(_msg("!token show"), root_id="")
@@ -35,7 +37,7 @@ class TestTokenCommandHandlerShow:
         assert "не установлен" in reply
 
     def test_show_displays_masked_token_when_set(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
         user_state.get_user_token.return_value = "sk-my-test-key"
 
         handler.handle(_msg("!token show"), root_id="")
@@ -45,7 +47,7 @@ class TestTokenCommandHandlerShow:
         assert "sk-my-test-key" not in reply  # full key must not appear
 
     def test_show_uses_runtime_key_over_user_id(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
         user_state.get_user_token.return_value = None
 
         handler.handle(_msg("!token show"), root_id="", runtime_key="channel-key")
@@ -53,7 +55,7 @@ class TestTokenCommandHandlerShow:
         user_state.get_user_token.assert_called_once_with("channel-key")
 
     def test_bare_token_command_defaults_to_show(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
         user_state.get_user_token.return_value = None
 
         handler.handle(_msg("!token"), root_id="")
@@ -64,7 +66,7 @@ class TestTokenCommandHandlerShow:
         assert "не установлен" in reply
 
     def test_unknown_subcommand_returns_usage(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
 
         handler.handle(_msg("!token bogus"), root_id="")
 
@@ -74,7 +76,7 @@ class TestTokenCommandHandlerShow:
 
 class TestTokenCommandHandlerSet:
     def test_set_posts_button_with_dialog_url(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
 
         handler.handle(_msg("!token set"), root_id="root1")
 
@@ -85,7 +87,7 @@ class TestTokenCommandHandlerSet:
         assert "token_set_dialog" in action_url
 
     def test_set_embeds_pod_key_in_context(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
 
         handler.handle(_msg("!token set", user_id="alice"), root_id="", runtime_key="rkey1")
 
@@ -96,7 +98,7 @@ class TestTokenCommandHandlerSet:
 
 class TestTokenCommandHandlerReset:
     def test_reset_confirms_when_token_was_set(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
         user_state.reset_user_token.return_value = True
 
         handler.handle(_msg("!token reset"), root_id="")
@@ -105,7 +107,7 @@ class TestTokenCommandHandlerReset:
         assert "✅" in reply
 
     def test_reset_reports_not_set_when_no_override(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
         user_state.reset_user_token.return_value = False
 
         handler.handle(_msg("!token reset"), root_id="")
@@ -114,12 +116,28 @@ class TestTokenCommandHandlerReset:
         assert "не был установлен" in reply
 
     def test_reset_uses_runtime_key_over_user_id(self):
-        handler, driver, user_state = _make_handler()
+        handler, driver, user_state, restart_fn = _make_handler()
         user_state.reset_user_token.return_value = False
 
         handler.handle(_msg("!token reset"), root_id="", runtime_key="rkey")
 
         user_state.reset_user_token.assert_called_once_with("rkey")
+
+    def test_reset_calls_restart_fn_when_token_was_set(self):
+        handler, driver, user_state, restart_fn = _make_handler()
+        user_state.reset_user_token.return_value = True
+
+        handler.handle(_msg("!token reset", user_id="user1"), root_id="")
+
+        restart_fn.assert_called_once_with("user1")
+
+    def test_reset_does_not_call_restart_fn_when_not_set(self):
+        handler, driver, user_state, restart_fn = _make_handler()
+        user_state.reset_user_token.return_value = False
+
+        handler.handle(_msg("!token reset"), root_id="")
+
+        restart_fn.assert_not_called()
 
 
 class TestEnvListFiltersTokenKey:
@@ -134,6 +152,7 @@ class TestEnvListFiltersTokenKey:
             get_driver=lambda: driver,
             base_url="http://localhost:8579",
             user_state=user_state,
+            restart_fn=MagicMock(),
         )
         msg = _msg("!env list")
 
@@ -154,6 +173,7 @@ class TestTokenDialogHandler:
             get_driver=lambda: driver,
             user_state=user_state,
             base_url="http://localhost:8579",
+            restart_fn=MagicMock(),
         )
         return handler, driver, user_state
 
